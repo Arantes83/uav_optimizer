@@ -2,6 +2,37 @@ import bpy
 from bpy.types import Panel
 
 
+def _pack_best_occ_key(obj):
+    if obj is None or obj.type != 'MESH' or obj.data.uv_layers.active is None:
+        return None
+    return f"_uav_best_uv_occupancy::{obj.data.uv_layers.active.name}"
+
+
+def _get_pack_best_occupancy(obj):
+    key = _pack_best_occ_key(obj)
+    if not key:
+        return 0.0
+    try:
+        return max(0.0, min(1.0, float(obj.get(key, 0.0))))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _enabled_pbr_maps(bake):
+    enabled = []
+    for map_id, attr in (
+        ("ALBEDO", "pbr_use_albedo"),
+        ("AO", "pbr_use_ao"),
+        ("NORMAL", "pbr_use_normal"),
+        ("ROUGHNESS", "pbr_use_roughness"),
+        ("METALLIC", "pbr_use_metallic"),
+        ("EMISSION", "pbr_use_emission"),
+    ):
+        if getattr(bake, attr, False):
+            enabled.append(map_id)
+    return enabled
+
+
 class UAV_PT_main_panel(Panel):
     bl_label       = "UAV Post-Processing Pipeline"
     bl_idname      = "UAV_PT_main_panel"
@@ -20,11 +51,31 @@ class UAV_PT_main_panel(Panel):
 
     def draw(self, context):
         layout = self.layout
-        props  = context.scene.uav_props
-        qw     = context.scene.uav_quadwild_props
-        uvp    = context.scene.uav_uvpack_props
-        bake   = context.scene.uav_bake_props
-        std_uv = context.scene.uav_std_uv_props
+        scene  = context.scene
+        props  = getattr(scene, "uav_props", None)
+        qw     = getattr(scene, "uav_quadwild_props", None)
+        uvp    = getattr(scene, "uav_uvpack_props", None)
+        bake   = getattr(scene, "uav_bake_props", None)
+        lod    = getattr(scene, "uav_lod_props", None)
+        std_uv = getattr(scene, "uav_std_uv_props", None)
+
+        missing = [
+            name for name, value in (
+                ("uav_props", props),
+                ("uav_quadwild_props", qw),
+                ("uav_uvpack_props", uvp),
+                ("uav_bake_props", bake),
+                ("uav_lod_props", lod),
+                ("uav_std_uv_props", std_uv),
+            )
+            if value is None
+        ]
+        if missing:
+            box = layout.box()
+            box.label(text="Addon registration incomplete.", icon='ERROR')
+            box.label(text="Disable and re-enable the addon.")
+            box.label(text="Missing: " + ", ".join(missing))
+            return
 
         # -- 1. Pre-Processing ----------------------------------------
         box = layout.box()
@@ -118,12 +169,17 @@ class UAV_PT_main_panel(Panel):
         # -- 6. UV Island Packing -------------------------------------
         box = layout.box()
         if self._draw_foldout_header(box, props, "ui_show_uv_pack", "6. Island Packing", icon='GROUP_UVS'):
-            self._draw_uv_pack(box, uvp)
+            self._draw_uv_pack(box, uvp, context.active_object)
 
         # -- 7. Baking ------------------------------------------------
         box = layout.box()
         if self._draw_foldout_header(box, props, "ui_show_bake", "7. Texture Baking", icon='RENDER_STILL'):
             self._draw_bake(box, bake)
+
+        # -- 8. LOD Generation ----------------------------------------
+        box = layout.box()
+        if self._draw_foldout_header(box, props, "ui_show_lod", "8. LOD Generation", icon='COMMUNITY'):
+            self._draw_lod(box, lod)
 
     # -----------------------------------------------------------------
     # 7. Baking sub-panel
@@ -143,8 +199,22 @@ class UAV_PT_main_panel(Panel):
         col.prop(bake, "texture_name",  text="Texture Name")
         col.separator(factor=0.3)
 
+        if bake.bake_type == 'PBR':
+            pbr_box = box.box()
+            pbr_box.label(text="PBR Maps", icon='NODE_MATERIAL')
+            row = pbr_box.row(align=True)
+            row.prop(bake, "pbr_use_albedo", toggle=True)
+            row.prop(bake, "pbr_use_ao", toggle=True)
+            row.prop(bake, "pbr_use_normal", toggle=True)
+            row = pbr_box.row(align=True)
+            row.prop(bake, "pbr_use_roughness", toggle=True)
+            row.prop(bake, "pbr_use_metallic", toggle=True)
+            row.prop(bake, "pbr_use_emission", toggle=True)
+            pbr_box.label(text="Creates separate images and links them to the low-poly materials.", icon='INFO')
+            col.separator(factor=0.3)
+
         # -- Normal space (only when baking normals) ----------------
-        if bake.bake_type == 'NORMAL':
+        if bake.bake_type in {'NORMAL', 'PBR'}:
             col.prop(bake, "normal_space", text="Normal Space")
             col.separator(factor=0.3)
 
@@ -168,18 +238,37 @@ class UAV_PT_main_panel(Panel):
         out_col.prop(bake, "output_dir", text="Output Folder")
 
         # -- Suffix preview ----------------------------------------
-        suffix_map = {'ALBEDO': '_albedo', 'AO': '_ao', 'NORMAL': '_normal'}
-        suffix = suffix_map.get(bake.bake_type, '')
         base   = bake.texture_name.strip() or "<object_name>"
+        suffix_map = {
+            'ALBEDO': '_albedo',
+            'AO': '_ao',
+            'NORMAL': '_normal',
+            'ROUGHNESS': '_roughness',
+            'METALLIC': '_metallic',
+            'EMISSION': '_emission',
+        }
         out_col.separator(factor=0.2)
-        out_col.label(text=f"File: {base}{suffix}.png", icon='FILE_IMAGE')
+        if bake.bake_type == 'PBR':
+            enabled_maps = _enabled_pbr_maps(bake)
+            if enabled_maps:
+                for map_id in enabled_maps:
+                    out_col.label(text=f"{base}{suffix_map[map_id]}.png", icon='FILE_IMAGE')
+            else:
+                out_col.label(text="Enable at least one PBR map.", icon='ERROR')
+        else:
+            suffix = suffix_map.get(bake.bake_type, '')
+            out_col.label(text=f"File: {base}{suffix}.png", icon='FILE_IMAGE')
 
         box.separator(factor=0.5)
 
         # -- Action button -----------------------------------------
         op_row = box.row(align=True)
         op_row.scale_y = 1.4
-        op_row.operator("uav.detail_baking", icon='RENDER_STILL', text="Bake Texture")
+        op_row.operator(
+            "uav.detail_baking",
+            icon='RENDER_STILL',
+            text="Bake PBR Set" if bake.bake_type == 'PBR' else "Bake Texture",
+        )
 
         # -- Last result -------------------------------------------
         if bake.last_bake_ok and bake.last_bake_path:
@@ -188,10 +277,17 @@ class UAV_PT_main_panel(Panel):
             row = res_col.row()
             row.label(text="Last baked:", icon='CHECKMARK')
             row.label(text=bake.last_bake_type)
+            if bake.last_bake_count > 1:
+                row = res_col.row()
+                row.label(text="Maps:")
+                row.label(text=str(bake.last_bake_count))
             row = res_col.row()
             row.label(text=f"Time: {bake.last_bake_time:.1f}s")
             res_col.separator(factor=0.2)
-            res_col.label(text=bake.last_bake_path, icon='FILE_TICK')
+            res_col.label(
+                text=bake.last_bake_path,
+                icon='FILE_FOLDER' if bake.last_bake_count > 1 else 'FILE_TICK',
+            )
 
     def _draw_uv_unwrap(self, box, std_uv):
         col = box.column(align=True)
@@ -271,16 +367,24 @@ class UAV_PT_main_panel(Panel):
             if std_uv.last_oob > 0:
                 res_col.label(text=f"{std_uv.last_oob} faces out of bounds", icon='ERROR')
 
-    def _draw_uv_pack(self, box, uvp):
+    def _draw_uv_pack(self, box, uvp, obj):
         col = box.column(align=True)
         col.use_property_split    = True
         col.use_property_decorate = False
+        best_ever = _get_pack_best_occupancy(obj)
 
-        col.prop(uvp, "packing_method",      text="Algorithm")
-        if uvp.packing_method == 'MAXRECTS':
-            col.prop(uvp, "maxrects_heuristic", text="Heuristic")
+        col.prop(uvp, "pack_engine", text="Engine")
 
-        col.prop(uvp, "optimizer",       text="Optimizer")
+        if uvp.pack_engine == 'BLENDER_NATIVE':
+            col.prop(uvp, "native_shape_method",   text="Shape")
+            col.prop(uvp, "native_merge_overlap",  text="Merge Overlap")
+            col.prop(uvp, "rotation_enable",       text="Allow Rotation")
+        else:
+            col.prop(uvp, "packing_method",      text="Algorithm")
+            if uvp.packing_method == 'MAXRECTS':
+                col.prop(uvp, "maxrects_heuristic", text="Heuristic")
+
+            col.prop(uvp, "optimizer",       text="Optimizer")
         col.prop(uvp, "precision",       text="Precision")
         col.prop(uvp, "margin",          text="Margin (UV)")
         col.prop(uvp, "rotation_enable", text="Allow Rotation")
@@ -324,7 +428,7 @@ class UAV_PT_main_panel(Panel):
 
             row = res_col.row()
             row.label(text="Best Ever:")
-            row.label(text=f"{uvp.best_ever_occupancy * 100:.1f}%")
+            row.label(text=f"{best_ever * 100:.1f}%")
 
             row = res_col.row()
             row.label(text="Iterations:")
@@ -337,6 +441,43 @@ class UAV_PT_main_panel(Panel):
             row = res_col.row()
             row.label(text="Time:")
             row.label(text=f"{uvp.last_time:.2f}s")
+
+    # -----------------------------------------------------------------
+    # 8. LOD sub-panel
+    # -----------------------------------------------------------------
+    def _draw_lod(self, box, lod):
+        col = box.column(align=True)
+        col.use_property_split    = True
+        col.use_property_decorate = False
+
+        col.prop(lod, "lod_ratio",          text="Ratio per Level")
+        col.prop(lod, "lod_min_polycount",  text="Min Polycount")
+        col.prop(lod, "lod_max_levels",     text="Max Levels")
+        col.prop(lod, "lod_collection_name",text="Collection Name")
+
+        box.separator(factor=0.4)
+
+        # Preview
+        row = box.row(align=True)
+        row.operator("uav.lod_preview", icon='HIDE_OFF', text="Preview LOD Table")
+
+        if lod.preview_base_tris > 0:
+            info = box.box()
+            col2 = info.column(align=True)
+            r = col2.row()
+            r.label(text="LOD0 (original):")
+            r.label(text=f"{lod.preview_base_tris:,} tris")
+            r = col2.row()
+            r.label(text="Levels to generate:")
+            r.label(text=str(lod.preview_levels))
+            r = col2.row()
+            r.label(text="Final LOD:")
+            r.label(text=f"{lod.preview_final_tris:,} tris")
+
+        box.separator(factor=0.4)
+        gen_row = box.row(align=True)
+        gen_row.scale_y = 1.4
+        gen_row.operator("uav.generate_lods", icon='COMMUNITY', text="Generate LODs")
 
     # -----------------------------------------------------------------
     # QuadWild sub-panel (UNCHANGED)

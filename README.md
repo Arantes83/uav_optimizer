@@ -2,19 +2,20 @@
 
 Addon para Blender focado em pós-processamento de malhas de fotogrametria e LiDAR.
 
-O objetivo do projeto é transformar uma malha densa e difícil de usar em um asset mais limpo, leve e pronto para UV, packing e baking, tudo dentro de um único painel no `View3D > Sidebar > UAV Opt`.
+O objetivo do projeto é transformar uma malha densa e difícil de usar em um asset mais limpo, leve e pronto para retopo, UV, packing, baking e geração de LODs, tudo dentro de um único painel em `View3D > Sidebar > UAV Opt`.
 
 ## Visão Geral
 
-O addon organiza a pipeline em sete etapas:
+O addon organiza a pipeline em oito etapas:
 
 1. Pre-processamento da malha
 2. Simplificação por QEM
 3. Retopologia em quads
 4. Geração de seams em grade
 5. UV unwrap nativo do Blender
-6. Packing de ilhas UV
-7. Bake de texturas
+6. Island Packing
+7. Texture Baking
+8. Geração de LODs
 
 ## Recursos
 
@@ -31,6 +32,7 @@ O addon organiza a pipeline em sete etapas:
 - `True QEM`
 - `Edge Length`
 - controle por densidade, ratio ou contagem alvo de vértices
+- rollback seguro quando a simplificação falha ou é pulada
 
 ### 3. Quad Retopology
 
@@ -46,7 +48,7 @@ O addon organiza a pipeline em sete etapas:
 
 ### 5. UV Unwrap
 
-O módulo de UV atual foi simplificado para usar apenas métodos nativos do Blender:
+O módulo de UV usa apenas métodos nativos do Blender:
 
 - `Smart UV Project`
 - `Angle Based`
@@ -62,27 +64,44 @@ Também inclui:
 - densidade média, mínima e máxima
 - checagem de flipped faces e UVs fora de `0-1`
 
-### 6. UV Packing
+### 6. Island Packing
 
+- engine nativa do Blender
 - engine própria em Python com `Skyline` e `MaxRects`
-- busca iterativa
-- simulated annealing
+- backend nativo em C++ para packing mais rápido
+- busca iterativa e `simulated annealing`
 - rotação configurável
 - margin em UV ou pixels
-- histórico de melhor ocupação
+- histórico de melhor ocupação por objeto e UV map
+- build local do packer via `build_uvpack.bat`
 
 ### 7. Texture Baking
 
-- bake de `Albedo`
-- bake de `AO`
-- bake de `Normal`
+- bake de `Albedo`, `AO`, `Normal`, `Roughness`, `Metallic` e `Emission`
+- modo `PBR` para gerar um conjunto completo de mapas em uma única execução
 - saída em PNG
 - controle de resolução, samples, margem e cage extrusion
+- criação automática dos `Image Texture` nodes e conexão correta no material final
+
+### 8. LOD Generation
+
+- geração de múltiplos níveis de detalhe a partir do objeto ativo
+- preview da tabela de LODs antes de gerar
+- `LOD0` criado como cópia real do source
+- decimate progressivo preservando seams UV
+- coleção dedicada para agrupar `LOD0..LODn`
+- objeto source preservado sem renomear nem sobrescrever a malha original
+
+## Dependências Nativas
+
+- `quadwild_lib`: integração externa usada no fluxo de retopologia
+- `uvpack_lib`: wrapper `ctypes` para o packer UV em C++
+- `uvpack_cpp`: código-fonte do backend nativo de packing
 
 ## Requisitos
 
 - Blender `4.2+`
-- Windows recomendado para o fluxo com `QuadWild`
+- Windows recomendado para o fluxo com `QuadWild` e para recompilar a DLL de packing
 
 ## Instalação
 
@@ -96,7 +115,7 @@ Também inclui:
 
 ### Opção 2: instalar em modo de desenvolvimento
 
-1. Copie a pasta do addon para sua pasta de addons do Blender.
+1. Copie a pasta do addon para a pasta de addons do Blender.
 2. Reinicie o Blender ou use `Refresh`.
 3. Ative `UAV Topology Optimizer` na lista de addons.
 
@@ -109,39 +128,56 @@ Fluxo sugerido para terrenos e fotogrametria:
 3. Gere uma nova malha com `QuadriFlow`, `QuadWild`, `Voxel` ou `Grid Projection`.
 4. Crie seams com `Generate UV Grid Seams` se necessário.
 5. Faça o unwrap em `UV Unwrapping`.
-6. Rode `Island Packing`.
-7. Faça o bake em `Texture Baking`.
+6. Rode `Island Packing` e escolha a engine mais adequada para o caso.
+7. Faça o bake em `Texture Baking`, incluindo o modo `PBR` quando precisar gerar o conjunto completo de mapas.
+8. Gere os LODs finais em `LOD Generation`, se necessário.
 
 ## Estrutura do Projeto
 
 Arquivos principais:
 
-- [__init__.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/__init__.py)
-- [properties.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/properties.py)
-- [ui.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/ui.py)
-- [op_preprocess.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_preprocess.py)
-- [op_qem.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_qem.py)
-- [op_quadriflow.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_quadriflow.py)
-- [op_quadwild.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_quadwild.py)
-- [op_shrinkwrap.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_shrinkwrap.py)
-- [op_voxel.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_voxel.py)
-- [op_chunk.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_chunk.py)
-- [op_uv.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_uv.py)
-- [op_packing.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_packing.py)
-- [op_bake.py](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/op_bake.py)
+- `__init__.py`
+- `properties.py`
+- `ui.py`
+- `op_preprocess.py`
+- `op_qem.py`
+- `op_quadriflow.py`
+- `op_quadwild.py`
+- `op_shrinkwrap.py`
+- `op_voxel.py`
+- `op_chunk.py`
+- `op_uv.py`
+- `op_packing.py`
+- `op_bake.py`
+- `op_lod.py`
 
 Pastas auxiliares:
 
-- [quadwild_lib](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/quadwild_lib)
-- [quadwild_util](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/quadwild_util)
-- [third_party](C:/Users/rodri/OneDrive/Documentos/CODEX/Blender_Addons/uav_opt/third_party)
+- `quadwild_lib/`
+- `quadwild_util/`
+- `uvpack_cpp/`
+- `uvpack_lib/`
+- `third_party/`
 
-## Observações
+## Build do Packer C++
 
-- O painel foi pensado para workflow técnico, não para asset authoring genérico.
-- O packing atual roda de forma síncrona. Em meshes grandes, ele pode bloquear a UI do Blender durante a busca.
-- O módulo de UV atual usa apenas operadores nativos do Blender para unwrap.
-- O fluxo com `QuadWild` depende das bibliotecas presentes em `quadwild_lib`.
+Para recompilar a DLL do packer UV no Windows:
+
+```powershell
+.\build_uvpack.bat
+```
+
+O script procura uma instalação compatível do Visual Studio 2022, compila `uvpack.cpp` e copia os artefatos finais para `uvpack_lib/`.
+
+## Atualizações Recentes
+
+### 10/04/2026
+
+- registro do addon ficou resiliente a reload parcial e a falhas de propriedades de cena
+- novo fluxo de LOD com painel próprio e `LOD0` criado a partir de cópia real do source
+- `Island Packing` ganhou seleção de engine, backend nativo em C++ e melhor ocupação persistida por objeto e UV map
+- `Texture Baking` foi refeito com lógica no estilo BakeLab, suporte a `PBR` e religação automática dos mapas no Shader Editor
+- `QEM Simplification` agora faz rollback seguro quando a operação não produz uma malha válida
 
 ## Desenvolvimento
 
@@ -163,4 +199,4 @@ python -c "import ast, pathlib; [ast.parse(p.read_text(encoding='utf-8')) for p 
 
 Projeto em desenvolvimento ativo.
 
-O foco atual é consolidar a pipeline de UV/packing e melhorar performance em operações pesadas.
+O foco atual é consolidar a pipeline de UV/packing, amadurecer o fluxo de bake e preparar a próxima geração do packer heurístico nativo.

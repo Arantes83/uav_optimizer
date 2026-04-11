@@ -93,6 +93,30 @@ class UAV_OT_qem_simplify(Operator):
         bpy.ops.object.duplicate()
         new_obj = context.active_object
         new_obj.name = f"{original_obj.name}_QEM"
+        new_obj_name = new_obj.name
+        try:
+            self._pre_cleanup(new_obj)
+
+            target_v, current_v, current_tris = self._resolve_target_counts(new_obj)
+            if target_v >= current_v:
+                bpy.data.objects.remove(new_obj, do_unlink=True)
+                self.report({'INFO'}, f"QEM skipped '{original_obj.name}' (target already reached).")
+                return
+
+            engine = self.props.qem_engine
+            if engine == 'FAST_DECIMATE':
+                self._run_fast_decimate(new_obj, target_v, current_v, current_tris)
+            else:
+                self._run_true_qem(context, new_obj, target_v)
+
+            self._post_cleanup(new_obj)
+            self._fix_normals_zup(new_obj)
+        except Exception:
+            if new_obj_name in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects[new_obj_name], do_unlink=True)
+            context.view_layer.objects.active = original_obj
+            original_obj.select_set(True)
+            raise
 
         original_obj.hide_set(True)
         original_obj.select_set(False)
@@ -100,21 +124,6 @@ class UAV_OT_qem_simplify(Operator):
             coll.objects.unlink(new_obj)
         self.qem_col.objects.link(new_obj)
         self.created_qem_chunks.append(new_obj)
-
-        self._pre_cleanup(new_obj)
-
-        target_v, current_v, current_tris = self._resolve_target_counts(new_obj)
-        if target_v >= current_v:
-            return
-
-        engine = self.props.qem_engine
-        if engine == 'FAST_DECIMATE':
-            self._run_fast_decimate(new_obj, target_v, current_v, current_tris)
-        else:
-            self._run_true_qem(context, new_obj, target_v)
-
-        self._post_cleanup(new_obj)
-        self._fix_normals_zup(new_obj)
 
     def _pre_cleanup(self, obj):
         bpy.context.view_layer.objects.active = obj

@@ -18,6 +18,7 @@ class UAVOptimizerProperties(PropertyGroup):
     ui_show_uv_unwrap: BoolProperty(name="Show UV Unwrap", default=False)
     ui_show_uv_pack: BoolProperty(name="Show UV Pack", default=False)
     ui_show_bake: BoolProperty(name="Show Bake", default=False)
+    ui_show_lod:  BoolProperty(name="Show LOD Generation", default=False)
 
 
     # ==========================================
@@ -529,6 +530,36 @@ class UAVUVStandardMethodsProperties(PropertyGroup):
 class UAVUVPackProperties(PropertyGroup):
     """All UV packing parameters. Registered as Scene.uav_uvpack_props."""
 
+    pack_engine: EnumProperty(
+        name="Engine",
+        description="Which packing backend to use",
+        items=[
+            ('BLENDER_NATIVE', "Blender Native",
+             "Blender's built-in Pack Islands operator — reliable baseline"),
+            ('PYTHON',         "Python Solver",
+             "Embedded Skyline / MaxRects in pure Python — no compilation needed"),
+            ('CPP_NATIVE',     "C++ Native (fast)",
+             "Same algorithm compiled to native C++ — 80-100x faster than Python. "
+             "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
+        ],
+        default='PYTHON',
+    )
+    native_shape_method: EnumProperty(
+        name="Shape Method",
+        description="Island shape used by Blender's native packer",
+        items=[
+            ('CONCAVE', "Concave",      "Best fit using concave outlines"),
+            ('CONVEX',  "Convex",       "Fit using convex hulls"),
+            ('AABB',    "Bounding Box", "Fast axis-aligned bounding boxes"),
+        ],
+        default='CONCAVE',
+    )
+    native_merge_overlap: BoolProperty(
+        name="Merge Overlap",
+        description="Treat overlapping islands as a single unit before packing",
+        default=False,
+    )
+
     packing_method: EnumProperty(
         name="Algorithm",
         description="Base rectangle-packing algorithm",
@@ -683,8 +714,46 @@ class UAVBakeProperties(PropertyGroup):
              "Occlusion pass. Saved with suffix _ao"),
             ('NORMAL', "Normal",
              "Tangent-space normal map. Saved with suffix _normal"),
+            ('ROUGHNESS', "Roughness",
+             "Surface roughness. Saved with suffix _roughness"),
+            ('METALLIC', "Metallic",
+             "Metallic / metalness mask. Saved with suffix _metallic"),
+            ('EMISSION', "Emission",
+             "Emission colour. Saved with suffix _emission"),
+            ('PBR', "PBR Set",
+             "Bake a full PBR texture set and wire the maps into the low-poly materials"),
         ],
         default='NORMAL',
+    )
+    pbr_use_albedo: BoolProperty(
+        name="Albedo",
+        description="Bake the base colour map in PBR mode",
+        default=True,
+    )
+    pbr_use_ao: BoolProperty(
+        name="AO",
+        description="Bake ambient occlusion in PBR mode",
+        default=True,
+    )
+    pbr_use_normal: BoolProperty(
+        name="Normal",
+        description="Bake the normal map in PBR mode",
+        default=True,
+    )
+    pbr_use_roughness: BoolProperty(
+        name="Roughness",
+        description="Bake roughness in PBR mode",
+        default=True,
+    )
+    pbr_use_metallic: BoolProperty(
+        name="Metallic",
+        description="Bake metallic / metalness in PBR mode",
+        default=False,
+    )
+    pbr_use_emission: BoolProperty(
+        name="Emission",
+        description="Bake emission colour in PBR mode",
+        default=False,
     )
 
     # -- Output --------------------------------------------------
@@ -755,5 +824,38 @@ class UAVBakeProperties(PropertyGroup):
     last_bake_type:  StringProperty(name="Last Type",    default="")
     last_bake_path:  StringProperty(name="Last Path",    default="")
     last_bake_time:  FloatProperty( name="Last Time (s)", default=0.0, precision=2)
+    last_bake_count: IntProperty(  name="Last Count",   default=0)
     last_bake_ok:    BoolProperty(  name="Last OK",      default=False)
 
+
+class UAVLODProperties(PropertyGroup):
+    """Parâmetros para geração de LODs. Registrado como Scene.uav_lod_props."""
+
+    lod_ratio: FloatProperty(
+        name="Reduction Ratio",
+        description=(
+            "Fração de triângulos mantida a cada nível. "
+            "0.5 = metade por nível (50% → 25% → 12.5% …)"
+        ),
+        default=0.5, min=0.1, max=0.9, precision=2, step=5, subtype='FACTOR',
+    )
+    lod_min_polycount: IntProperty(
+        name="Min Polycount (LOD final)",
+        description="Polycount alvo do LOD mais simples. A geração para quando este valor é atingido ou ultrapassado",
+        default=1000, min=4, max=10000000,
+    )
+    lod_max_levels: IntProperty(
+        name="Max Levels",
+        description="Número máximo de LODs a gerar (segurança contra loops infinitos)",
+        default=8, min=1, max=16,
+    )
+    lod_collection_name: StringProperty(
+        name="Collection Name",
+        description="Nome da coleção onde os LODs serão agrupados. Deixe vazio para usar '{nome_objeto}_LODs'",
+        default="",
+    )
+
+    # -- Preview (read-only, preenchido por UAV_OT_lod_preview) --------------
+    preview_base_tris:  IntProperty(name="Base Tris",   default=0)
+    preview_levels:     IntProperty(name="Levels",      default=0)
+    preview_final_tris: IntProperty(name="Final Tris",  default=0)

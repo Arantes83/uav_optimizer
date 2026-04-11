@@ -1,2 +1,5 @@
 __pycache__/
 *.pyc
+uvpack_cpp/*.obj
+uvpack_lib/*.lib
+uvpack_lib/*.exp

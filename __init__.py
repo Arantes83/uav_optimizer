@@ -8,7 +8,7 @@ bl_info = {
         "Photogrammetry / LiDAR post-processing pipeline. "
         "Pre-processing, QEM decimation, quad retopology (QuadriFlow, QuadWild, "
         "Voxel, Grid Projection), grid seam generation, native Blender UV unwrap, "
-        "advanced UV island packing, and Albedo / AO / Normal map baking."
+        "advanced UV island packing, Albedo / AO / Normal map baking, and LOD generation."
     ),
     "category": "3D View",
 }
@@ -23,14 +23,17 @@ import bpy
 _addon_dir = os.path.dirname(os.path.abspath(__file__))
 _dll_dir   = os.path.join(_addon_dir, "quadwild_lib")
 
-if os.path.isdir(_dll_dir):
-    if _dll_dir not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = _dll_dir + os.pathsep + os.environ.get("PATH", "")
-    if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
-        try:
-            os.add_dll_directory(_dll_dir)
-        except OSError:
-            pass
+_uvpack_dll_dir = os.path.join(_addon_dir, "uvpack_lib")
+
+for _d in (_dll_dir, _uvpack_dll_dir):
+    if os.path.isdir(_d):
+        if _d not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _d + os.pathsep + os.environ.get("PATH", "")
+        if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+            try:
+                os.add_dll_directory(_d)
+            except OSError:
+                pass
 
 # ---------------------------------------------------------------------------
 # Reload support (hot-reload without restarting Blender)
@@ -39,7 +42,7 @@ if "bpy" in locals():
     import importlib
     from . import (
         properties, qem_core, op_preprocess, op_qem, op_quadriflow, op_quadwild,
-        op_shrinkwrap, op_voxel, op_chunk, op_uv, op_packing, op_bake, ui,
+        op_shrinkwrap, op_voxel, op_chunk, op_uv, op_packing, op_bake, op_lod, ui,
     )
     importlib.reload(properties)
     importlib.reload(qem_core)
@@ -53,12 +56,13 @@ if "bpy" in locals():
     importlib.reload(op_uv)
     importlib.reload(op_packing)
     importlib.reload(op_bake)
+    importlib.reload(op_lod)
     importlib.reload(ui)
 
 from .properties import (
-    UAVOptimizerProperties, UAVQuadWildProperties, 
+    UAVOptimizerProperties, UAVQuadWildProperties,
     UAVUVStandardMethodsProperties,
-    UAVUVPackProperties, UAVBakeProperties,
+    UAVUVPackProperties, UAVBakeProperties, UAVLODProperties,
 )
 from .op_uv  import (
     UAV_OT_uv_unwrap,
@@ -66,6 +70,7 @@ from .op_uv  import (
 )
 from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset
 from .op_bake import UAV_OT_detail_baking
+from .op_lod  import UAV_OT_generate_lods, UAV_OT_lod_preview
 from .ui import UAV_PT_main_panel
 from .op_preprocess import UAV_OT_preprocess
 from .op_qem        import UAV_OT_qem_simplify
@@ -82,6 +87,7 @@ classes = (
     UAVUVStandardMethodsProperties,
     UAVUVPackProperties,
     UAVBakeProperties,
+    UAVLODProperties,
 
     # UI
     UAV_PT_main_panel,
@@ -106,34 +112,73 @@ classes = (
 
     # Baking
     UAV_OT_detail_baking,
+    UAV_OT_generate_lods,
+    UAV_OT_lod_preview,
 )
 
 
-def register():
-    for cls in classes:
+SCENE_PROPS = (
+    ("uav_props", UAVOptimizerProperties),
+    ("uav_quadwild_props", UAVQuadWildProperties),
+    ("uav_uvpack_props", UAVUVPackProperties),
+    ("uav_bake_props", UAVBakeProperties),
+    ("uav_lod_props", UAVLODProperties),
+    ("uav_std_uv_props", UAVUVStandardMethodsProperties),
+)
+
+
+def _safe_unregister_class(cls):
+    registered_cls = getattr(bpy.types, cls.__name__, None)
+    for candidate in (registered_cls, cls):
+        if candidate is None:
+            continue
+        try:
+            bpy.utils.unregister_class(candidate)
+            return
+        except (RuntimeError, ValueError):
+            continue
+
+
+def _safe_register_class(cls):
+    _safe_unregister_class(cls)
+    try:
+        bpy.utils.register_class(cls)
+    except (RuntimeError, ValueError) as exc:
+        if "already registered" not in str(exc):
+            raise
+        _safe_unregister_class(cls)
         bpy.utils.register_class(cls)
 
-    bpy.types.Scene.uav_props = bpy.props.PointerProperty(
-        type=UAVOptimizerProperties)
-    bpy.types.Scene.uav_quadwild_props = bpy.props.PointerProperty(
-        type=UAVQuadWildProperties)
-    bpy.types.Scene.uav_uvpack_props = bpy.props.PointerProperty(
-        type=UAVUVPackProperties)
-    bpy.types.Scene.uav_bake_props = bpy.props.PointerProperty(
-        type=UAVBakeProperties)
-    bpy.types.Scene.uav_std_uv_props = bpy.props.PointerProperty(
-        type=UAVUVStandardMethodsProperties)
+
+def _safe_unregister_scene_prop(name):
+    if hasattr(bpy.types.Scene, name):
+        try:
+            delattr(bpy.types.Scene, name)
+        except AttributeError:
+            pass
+
+
+def _safe_register_scene_prop(name, prop_type):
+    _safe_unregister_scene_prop(name)
+    setattr(bpy.types.Scene, name, bpy.props.PointerProperty(type=prop_type))
+
+
+def register():
+    unregister()
+
+    for cls in classes:
+        _safe_register_class(cls)
+
+    for name, prop_type in SCENE_PROPS:
+        _safe_register_scene_prop(name, prop_type)
 
 
 def unregister():
-    del bpy.types.Scene.uav_std_uv_props
-    del bpy.types.Scene.uav_bake_props
-    del bpy.types.Scene.uav_uvpack_props
-    del bpy.types.Scene.uav_quadwild_props
-    del bpy.types.Scene.uav_props
+    for name, _prop_type in reversed(SCENE_PROPS):
+        _safe_unregister_scene_prop(name)
 
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        _safe_unregister_class(cls)
 
 
 if __name__ == "__main__":

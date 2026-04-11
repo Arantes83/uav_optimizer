@@ -198,6 +198,41 @@ def _scale_island_from_center(faces, uv_layer, factor):
             uv.y = cy + (uv.y - cy) * factor
 
 
+def _pack_best_occ_key(obj, uv_layer):
+    uv_name = getattr(uv_layer, "name", "") or "UVMap"
+    return f"_uav_best_uv_occupancy::{uv_name}"
+
+
+def _get_pack_best_occupancy(obj, uv_layer):
+    if obj is None or uv_layer is None:
+        return 0.0
+    try:
+        return max(0.0, min(1.0, float(obj.get(_pack_best_occ_key(obj, uv_layer), 0.0))))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _set_pack_best_occupancy(obj, uv_layer, value):
+    if obj is None or uv_layer is None:
+        return 0.0
+    clamped = max(0.0, min(1.0, float(value)))
+    obj[_pack_best_occ_key(obj, uv_layer)] = clamped
+    return clamped
+
+
+def _clear_pack_best_occupancy(obj, uv_layer):
+    if obj is None or uv_layer is None:
+        return
+    key = _pack_best_occ_key(obj, uv_layer)
+    if key in obj:
+        del obj[key]
+
+
+def _sync_pack_best_occupancy(props, obj, uv_layer):
+    props.best_ever_occupancy = _get_pack_best_occupancy(obj, uv_layer)
+    return props.best_ever_occupancy
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  PACKING ENGINE (STANDALONE)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -307,7 +342,9 @@ def _attempt(data, order, rots, margin, method, sub):
         d = data[idx]; rw,rh = _rotdims(d['w'],d['h'],rots[idx])
         pw,ph = rw+margin*2, rh+margin*2
         res = ins(pw, ph)
-        placements[idx] = {'x':(res[0]+margin if res else 0.), 'y':(res[1]+margin if res else 0.), 'angle':rots[idx]}
+        if res is None:
+            return None, -1.0, 1.0
+        placements[idx] = {'x':res[0]+margin, 'y':res[1]+margin, 'angle':rots[idx]}
     th = pk.height()
     if th < 1e-9: return placements, 0., 1.
     occ = sum(d['area'] for d in data) / (1.*th) if th>1e-12 else 0.
@@ -329,7 +366,7 @@ def _iter_opt(data, margin, method, sub, angles, max_iter, tlim, min_occ):
     def try_it(o,r):
         nonlocal best_occ,best,it; it+=1
         p,occ,s=_attempt(data,o,r,margin,method,sub)
-        if occ>best_occ+1e-6: best_occ=occ; best=(p,r[:],s)
+        if p is not None and occ>best_occ+1e-6: best_occ=occ; best=(p,r[:],s)
     def done(): return it>=max_iter or (time.time()-t0)>tlim or best_occ>=0.98
     for kf in keys:
         if done(): break
@@ -365,7 +402,10 @@ def _sa_opt(data, margin, method, sub, angles, max_iter, tlim, temp0, cool, min_
     order=sorted(range(n),key=lambda i:-data[i]['area']); rots=[0.]*n
     p,cur,s=_attempt(data,order,rots,margin,method,sub)
     best_occ=min_occ; best=None
-    if cur>best_occ+1e-6: best_occ=cur; best=(p,rots[:],s)
+    if p is not None and cur>best_occ+1e-6:
+        best_occ=cur; best=(p,rots[:],s)
+    else:
+        cur=min_occ
     temp=temp0; it=0
     while it<max_iter and (time.time()-t0)<tlim and best_occ<0.98:
         no=order[:]; nr=rots[:]
@@ -377,7 +417,11 @@ def _sa_opt(data, margin, method, sub, angles, max_iter, tlim, temp0, cool, min_
             elif act<0.8: i,j=random.randint(0,n-1),random.randint(0,n-1); item=no.pop(i); no.insert(j,item)
             else:
                 i,j=sorted(random.sample(range(n),2)); no[i:j+1]=reversed(no[i:j+1])
-        p,new,s=_attempt(data,no,nr,margin,method,sub); delta=new-cur
+        p,new,s=_attempt(data,no,nr,margin,method,sub)
+        if p is None:
+            temp*=cool; it+=1
+            continue
+        delta=new-cur
         acc=delta>0
         if not acc and temp>1e-12:
             try: acc=random.random()<math.exp(delta/temp)
@@ -420,7 +464,7 @@ def _apply(bm, ul, islands, data, placements, scale, props, margin):
     return min(sum(_area(f,ul) for f in islands),1.)
 
 
-def run_packing_engine(bm, uv_layer, props, report_fn=None):
+def run_packing_engine(obj, bm, uv_layer, props, report_fn=None):
     """Pack UV islands. props = UAVUVPackProperties."""
     t0 = time.time()
     islands = _get_uv_islands(bm, uv_layer)
@@ -431,7 +475,8 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
     n            = len(islands)
     cur_uvs      = _save(bm, uv_layer)
     cur_occ      = min(sum(_area(f, uv_layer) for f in islands), 1.)
-    min_occ      = max(cur_occ, props.best_ever_occupancy)
+    prev_best    = _sync_pack_best_occupancy(props, obj, uv_layer)
+    min_occ      = cur_occ
     margin       = _eff_margin(props)
     angs         = _angles(props)
     max_iter     = props.precision
@@ -442,7 +487,7 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
     if report_fn:
         report_fn({'INFO'},
             f"Found {n} island(s). Current: {cur_occ*100:.1f}%. "
-            f"Running {method} + {props.optimizer}…")
+            f"Best: {prev_best*100:.1f}%. Running {method} + {props.optimizer}…")
 
     data = []
     for faces in islands:
@@ -457,7 +502,7 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
         order = sorted(range(n), key=lambda i: -data[i]['area'])
         rots  = [0.]*n
         p,occ,s = _attempt(data,order,rots,margin,method,sub)
-        best_result = (p,rots,s) if occ>min_occ+1e-6 else None
+        best_result = (p,rots,s) if p is not None and occ>min_occ+1e-6 else None
         best_occ,iters = (occ if best_result else min_occ), 1
     elif props.optimizer == 'ITERATIVE':
         best_result,best_occ,iters = _iter_opt(data,margin,method,sub,angs,max_iter,tlim,min_occ)
@@ -476,7 +521,8 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
                     tr=rts[:]; tr[idx]=a
                     order=sorted(range(n),key=lambda i:-data[i]['area'])
                     p,o,s=_attempt(data,order,tr,margin,method,sub); iters+=1; rc+=1
-                    if o>best_occ+1e-6: best_occ=o; best_result=(p,tr[:],s); rts=tr[:]; improved=True; break
+                    if p is not None and o>best_occ+1e-6:
+                        best_occ=o; best_result=(p,tr[:],s); rts=tr[:]; improved=True; break
 
     elapsed = time.time()-t0
 
@@ -484,7 +530,8 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
         pl,rts,sc = best_result
         _restore(bm, uv_layer, norm_uvs)
         final_occ = _apply(bm,uv_layer,islands,data,pl,sc,props,margin)
-        props.best_ever_occupancy = max(props.best_ever_occupancy, final_occ)
+        props.best_ever_occupancy = _set_pack_best_occupancy(
+            obj, uv_layer, max(prev_best, final_occ))
         props.last_occupancy  = final_occ*100
         props.last_iterations = iters
         props.last_time       = elapsed
@@ -495,6 +542,7 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
                 f"(was {min_occ*100:.1f}%) | {iters} iters | {elapsed:.2f}s")
     else:
         _restore(bm, uv_layer, cur_uvs)
+        props.best_ever_occupancy = prev_best
         props.last_iterations = iters
         props.last_time       = elapsed
         props.last_method     = f"{method} + {props.optimizer} (no improvement)"
@@ -508,6 +556,185 @@ def run_packing_engine(bm, uv_layer, props, report_fn=None):
 #  OPERATORS
 # ═══════════════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  ENGINE — BLENDER NATIVE
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _call_blender_native_pack(props, margin):
+    """Chama bpy.ops.uv.pack_islands com fallback para versões antigas do Blender."""
+    attempts = [
+        dict(rotate=props.rotation_enable, scale=True,
+             merge_overlap=props.native_merge_overlap,
+             margin_method='SCALED', shape_method=props.native_shape_method,
+             margin=margin),
+        dict(rotate=props.rotation_enable, scale=True,
+             margin_method='SCALED', shape_method=props.native_shape_method,
+             margin=margin),
+        dict(rotate=props.rotation_enable, scale=True,
+             margin_method='SCALED', margin=margin),
+        dict(rotate=props.rotation_enable, margin=margin),
+        dict(margin=margin),
+    ]
+    last_err = None
+    for kwargs in attempts:
+        try:
+            bpy.ops.uv.pack_islands(**kwargs)
+            return
+        except TypeError as e:
+            last_err = e
+    if last_err:
+        raise last_err
+
+
+def run_blender_native_pack(obj, bm, uv_layer, props, report_fn=None):
+    """Pack UV usando o operador nativo do Blender."""
+    import time
+    t0     = time.time()
+    margin = _eff_margin(props)
+    prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+
+    bpy.ops.mesh.select_all(action='SELECT')
+    _call_blender_native_pack(props, margin)
+
+    islands   = _get_uv_islands(bm, uv_layer)
+    occupancy = min(sum(_area(f, uv_layer) for f in islands), 1.0)
+    elapsed   = time.time() - t0
+
+    props.best_ever_occupancy = _set_pack_best_occupancy(
+        obj, uv_layer, max(prev_best, occupancy))
+    props.last_occupancy  = occupancy * 100.0
+    props.last_iterations = 1
+    props.last_time       = elapsed
+    props.last_method     = f"Blender Native ({props.native_shape_method.title()})"
+
+    if report_fn:
+        report_fn({'INFO'}, f"Blender native pack: {occupancy*100:.1f}% | {elapsed:.2f}s")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ENGINE — C++ NATIVE (via DLL)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
+    """
+    Pack UV islands via DLL C++ (lib_uvpack).
+    O loop de optimização roda em C++ compilado (~80-100x mais rápido que Python).
+    O apply final permanece em Python pois acessa estruturas internas do Blender.
+    """
+    import time
+    try:
+        from .uvpack_lib import get_lib, UVPackException
+    except ImportError as e:
+        if report_fn:
+            report_fn({'ERROR'}, f"uvpack_lib não encontrado: {e}")
+        return
+
+    t0 = time.time()
+
+    islands = _get_uv_islands(bm, uv_layer)
+    if not islands:
+        if report_fn:
+            report_fn({'WARNING'}, "Nenhuma ilha UV encontrada.")
+        return
+
+    n       = len(islands)
+    cur_uvs = _save(bm, uv_layer)
+    cur_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+    prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+    min_occ = cur_occ
+    margin  = _eff_margin(props)
+
+    if report_fn:
+        report_fn({'INFO'},
+            f"C++ pack: {n} ilha(s). Atual: {cur_occ*100:.1f}%. "
+            f"Melhor: {prev_best*100:.1f}%. {props.packing_method}+{props.optimizer}…")
+
+    # Normalizar e montar lista para a DLL
+    islands_data = []
+    for i, faces in enumerate(islands):
+        w, h = _normalize(faces, uv_layer)
+        islands_data.append({'id': i, 'w': w, 'h': h, 'area': _area(faces, uv_layer)})
+    norm_uvs = _save(bm, uv_layer)
+
+    try:
+        lib = get_lib()
+        placements, best_occ = lib.pack(islands_data, props, min_occupancy=min_occ)
+    except UVPackException as e:
+        if report_fn:
+            report_fn({'ERROR'}, str(e))
+        _restore(bm, uv_layer, cur_uvs)
+        return
+
+    elapsed = time.time() - t0
+
+    if best_occ <= min_occ + 1e-6:
+        _restore(bm, uv_layer, cur_uvs)
+        props.best_ever_occupancy = prev_best
+        props.last_iterations = props.precision
+        props.last_time       = elapsed
+        props.last_method     = f"C++ {props.packing_method}+{props.optimizer} (sem melhora)"
+        if report_fn:
+            report_fn({'WARNING'},
+                f"Sem melhora (atual: {min_occ*100:.1f}%). ({elapsed:.2f}s)")
+        return
+
+    # Apply: restaurar UVs normalizados e aplicar placements
+    _restore(bm, uv_layer, norm_uvs)
+    # scale=1.0: coordenadas da DLL ja estao em espaco [0,1] de largura.
+    # O bloco MAX_SCALE abaixo normaliza a altura se ultrapassar 1.
+    pl_map = {p['id']: p for p in placements}
+
+    for i, faces in enumerate(islands):
+        p = pl_map[i]
+        if abs(p['angle']) > 0.01:
+            _rotate(faces, uv_layer, p['angle'])
+        _normalize(faces, uv_layer)
+        _translate(faces, uv_layer, p['x'], p['y'])
+
+    # Escala final (mesmo comportamento do solver Python)
+    if props.scale_mode == 'MAX_SCALE':
+        g0=g1=float('inf'); g2=g3=float('-inf')
+        for faces in islands:
+            a, b, c, d = _bounds(faces, uv_layer)
+            g0=min(g0,a); g1=min(g1,b); g2=max(g2,c); g3=max(g3,d)
+        cw, ch = g2-g0, g3-g1
+        if cw > 1e-9 and ch > 1e-9:
+            tgt = max(0.1, 1. - margin*2)
+            sf  = min(tgt/cw, tgt/ch)
+            for faces in islands:
+                _translate(faces, uv_layer, -g0, -g1)
+                _scale(faces, uv_layer, sf, sf)
+            g0=g1=float('inf'); g2=g3=float('-inf')
+            for faces in islands:
+                a, b, c, d = _bounds(faces, uv_layer)
+                g0=min(g0,a); g1=min(g1,b); g2=max(g2,c); g3=max(g3,d)
+            ou = (1.-(g2-g0))*0.5 - g0
+            ov = (1.-(g3-g1))*0.5 - g1
+            for faces in islands:
+                _translate(faces, uv_layer, ou, ov)
+    elif props.scale_mode == 'CUSTOM':
+        cf = props.custom_scale
+        for faces in islands:
+            for f in faces:
+                for l in f.loops:
+                    uv = l[uv_layer].uv
+                    uv.x = 0.5 + (uv.x - 0.5) * cf
+                    uv.y = 0.5 + (uv.y - 0.5) * cf
+
+    final_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+    props.best_ever_occupancy = _set_pack_best_occupancy(
+        obj, uv_layer, max(prev_best, final_occ))
+    props.last_occupancy  = final_occ * 100.
+    props.last_iterations = props.precision
+    props.last_time       = elapsed
+    props.last_method     = f"C++ {props.packing_method}+{props.optimizer}"
+
+    if report_fn:
+        report_fn({'INFO'},
+            f"C++ pack OK! {final_occ*100:.1f}% "
+            f"(era {min_occ*100:.1f}%) | {elapsed:.2f}s")
+
+
 class UAV_OT_uv_pack(Operator):
     """Pack UV islands using the embedded Skyline/MaxRects engine"""
     bl_idname  = "uav.uv_pack"
@@ -515,7 +742,7 @@ class UAV_OT_uv_pack(Operator):
     bl_description = (
         "Pack UV islands using Skyline or MaxRects packer with "
         "Iterative or Simulated Annealing optimizer. "
-        "Only applies result when it improves on the previous best."
+        "Only applies result when it improves on the current layout."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -542,7 +769,12 @@ class UAV_OT_uv_pack(Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
             return {'CANCELLED'}
 
-        run_packing_engine(bm, uv_layer, uvp, self.report)
+        if uvp.pack_engine == 'BLENDER_NATIVE':
+            run_blender_native_pack(obj, bm, uv_layer, uvp, self.report)
+        elif uvp.pack_engine == 'CPP_NATIVE':
+            run_cpp_pack(obj, bm, uv_layer, uvp, self.report)
+        else:
+            run_packing_engine(obj, bm, uv_layer, uvp, self.report)
         bmesh.update_edit_mesh(obj.data)
 
         if not was_edit:
@@ -558,6 +790,11 @@ class UAV_OT_uv_pack_reset(Operator):
 
     def execute(self, context):
         uvp = context.scene.uav_uvpack_props
+        obj = context.active_object
+        uv_layer = None
+        if obj and obj.type == 'MESH':
+            uv_layer = obj.data.uv_layers.active
+        _clear_pack_best_occupancy(obj, uv_layer)
         uvp.best_ever_occupancy = 0.0
         uvp.run_counter         = 0
         uvp.last_occupancy      = 0.0
