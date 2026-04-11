@@ -113,7 +113,7 @@ class UAV_OT_generate_lods(Operator):
         if not self._lod_table:
             self.report(
                 {'WARNING'},
-                'Nenhum LOD a gerar: o objeto ja tem menos triangulos que o target, ou os parametros sao invalidos.',
+                'No LODs to generate: the object is already below the target or the parameters are invalid.',
             )
             return {'CANCELLED'}
 
@@ -150,7 +150,7 @@ class UAV_OT_generate_lods(Operator):
             final_level = max(0, len(self._created) - 1)
             self.report(
                 {'INFO'},
-                f'LODs gerados: {len(self._created)} objeto(s) | '
+                f'Generated {len(self._created)} LOD object(s) | '
                 f'LOD0={self._base_tris:,} tris -> '
                 f'LOD{final_level}={self._lod_table[-1]["tris"]:,} tris',
             )
@@ -161,7 +161,7 @@ class UAV_OT_generate_lods(Operator):
             self._process_step(context, entry)
         except Exception as exc:
             self._finish(context)
-            self.report({'ERROR'}, f'Erro no LOD{entry["level"]}: {exc}')
+            self.report({'ERROR'}, f'LOD{entry["level"]} failed: {exc}')
             return {'CANCELLED'}
 
         self._step_idx += 1
@@ -193,6 +193,7 @@ class UAV_OT_lod_preview(Operator):
 
     bl_idname = 'uav.lod_preview'
     bl_label = 'Preview LOD Table'
+    bl_description = 'Estimate how many LOD levels will be generated and their triangle counts'
     bl_options = {'INTERNAL'}
 
     @classmethod
@@ -222,5 +223,5 @@ class UAV_OT_lod_preview(Operator):
                 f'  LOD{entry["level"]}: ~{entry["tris"]:,} tris (step ratio {entry["step_ratio"]:.3f})',
             )
         if not table:
-            self.report({'WARNING'}, 'Nenhum LOD seria gerado com esses parametros.')
+            self.report({'WARNING'}, 'No LODs would be generated with the current settings.')
         return {'FINISHED'}

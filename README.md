@@ -176,7 +176,7 @@ O script procura uma instalação compatível do Visual Studio 2022, compila `uv
 - registro do addon ficou resiliente a reload parcial e a falhas de propriedades de cena
 - novo fluxo de LOD com painel próprio e `LOD0` criado a partir de cópia real do source
 - `Island Packing` ganhou seleção de engine, backend nativo em C++ e melhor ocupação persistida por objeto e UV map
-- `Texture Baking` foi refeito com lógica no estilo BakeLab, suporte a `PBR` e religação automática dos mapas no Shader Editor
+- `Texture Baking` foi refeito com suporte a `PBR` e religação automática dos mapas no Shader Editor
 - `QEM Simplification` agora faz rollback seguro quando a operação não produz uma malha válida
 
 ## Desenvolvimento

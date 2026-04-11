@@ -11,14 +11,46 @@ class UAVOptimizerProperties(PropertyGroup):
     # ==========================================
     # UI Foldouts
     # ==========================================
-    ui_show_preprocess: BoolProperty(name="Show Pre-Processing", default=True)
-    ui_show_qem: BoolProperty(name="Show QEM", default=True)
-    ui_show_retopo: BoolProperty(name="Show Retopology", default=False)
-    ui_show_grid_seams: BoolProperty(name="Show Grid Seams", default=False)
-    ui_show_uv_unwrap: BoolProperty(name="Show UV Unwrap", default=False)
-    ui_show_uv_pack: BoolProperty(name="Show UV Pack", default=False)
-    ui_show_bake: BoolProperty(name="Show Bake", default=False)
-    ui_show_lod:  BoolProperty(name="Show LOD Generation", default=False)
+    ui_show_preprocess: BoolProperty(
+        name="Show Pre-Processing",
+        description="Expand or collapse the mesh cleanup section",
+        default=True,
+    )
+    ui_show_qem: BoolProperty(
+        name="Show QEM",
+        description="Expand or collapse the QEM simplification section",
+        default=True,
+    )
+    ui_show_retopo: BoolProperty(
+        name="Show Retopology",
+        description="Expand or collapse the quad retopology section",
+        default=False,
+    )
+    ui_show_grid_seams: BoolProperty(
+        name="Show Grid Seams",
+        description="Expand or collapse the UV grid seam generation section",
+        default=False,
+    )
+    ui_show_uv_unwrap: BoolProperty(
+        name="Show UV Unwrap",
+        description="Expand or collapse the native UV unwrapping section",
+        default=False,
+    )
+    ui_show_uv_pack: BoolProperty(
+        name="Show UV Pack",
+        description="Expand or collapse the island packing section",
+        default=False,
+    )
+    ui_show_bake: BoolProperty(
+        name="Show Bake",
+        description="Expand or collapse the texture baking section",
+        default=False,
+    )
+    ui_show_lod: BoolProperty(
+        name="Show LOD Generation",
+        description="Expand or collapse the LOD generation section",
+        default=False,
+    )
 
 
     # ==========================================
@@ -85,8 +117,9 @@ class UAVOptimizerProperties(PropertyGroup):
     )
     qem_density_unit: EnumProperty(
         name="Unit",
-        items=[('M2', "m²", "Triangles per square metre"),
-               ('CM2', "cm²", "Triangles per square centimetre")],
+        description="Surface-area unit used by Density target mode",
+        items=[('M2', "m^2", "Triangles per square meter"),
+               ('CM2', "cm^2", "Triangles per square centimeter")],
         default='M2'
     )
     qem_target_density: FloatProperty(
@@ -383,17 +416,27 @@ class UAVQuadWildProperties(PropertyGroup):
         name="Repeat Losing Iters",
         description="Repeat iterations when constraints are lost", default=True)
     repeat_losing_quads: BoolProperty(
-        name="Repeat Losing Quads", default=False)
+        name="Repeat Losing Quads",
+        description="Retry when quad regularity constraints are lost",
+        default=False,
+    )
     repeat_losing_non_quads: BoolProperty(
-        name="Repeat Losing Non-Quads", default=False)
+        name="Repeat Losing Non-Quads",
+        description="Retry when non-quad regularity constraints are lost",
+        default=False,
+    )
     repeat_losing_align: BoolProperty(
-        name="Repeat Losing Align", default=True)
+        name="Repeat Losing Align",
+        description="Retry when singularity alignment constraints are lost",
+        default=True,
+    )
     hard_parity: BoolProperty(
         name="Hard Parity Constraint", description="Enforce hard parity constraint", default=True)
 
     # -- Flow / Satsuma configs --------------------------------
     flow_config: EnumProperty(
         name="Flow Config",
+        description="Preset used for the flow field stage of QuadWild",
         items=[
             ("SIMPLE", "Simple", "flow_virtual_simple.json", 1),
             ("HALF",   "Half",   "flow_virtual_half.json",   2),
@@ -514,16 +557,56 @@ class UAVUVStandardMethodsProperties(PropertyGroup):
         default=4096, min=64, max=8192,
     )
 
-    last_method_used: StringProperty(name="Last Method", default="")
-    last_islands: IntProperty(name="Islands", default=0)
-    last_stretch: FloatProperty(name="Stretch", default=0.0, precision=3)
-    last_coverage: FloatProperty(name="Coverage", default=0.0, precision=1)
-    last_time: FloatProperty(name="Time", default=0.0, precision=2)
-    last_flipped: IntProperty(name="Flipped", default=0)
-    last_oob: IntProperty(name="OOB", default=0)
-    last_avg_density: FloatProperty(name="Avg Density", default=0.0, precision=4)
-    last_min_density: FloatProperty(name="Min Density", default=0.0, precision=4)
-    last_max_density: FloatProperty(name="Max Density", default=0.0, precision=4)
+    last_method_used: StringProperty(
+        name="Last Method",
+        description="Last native unwrap method executed by the addon",
+        default="",
+    )
+    last_islands: IntProperty(
+        name="Islands",
+        description="Number of UV islands measured in the last analysis run",
+        default=0,
+    )
+    last_stretch: FloatProperty(
+        name="Stretch",
+        description="Average UV stretch measured in the last analysis run",
+        default=0.0, precision=3,
+    )
+    last_coverage: FloatProperty(
+        name="Coverage",
+        description="Atlas coverage percentage measured in the last analysis run",
+        default=0.0, precision=1,
+    )
+    last_time: FloatProperty(
+        name="Time",
+        description="Execution time of the last unwrap-related operation",
+        default=0.0, precision=2,
+    )
+    last_flipped: IntProperty(
+        name="Flipped",
+        description="Number of flipped UV faces detected in the last analysis run",
+        default=0,
+    )
+    last_oob: IntProperty(
+        name="OOB",
+        description="Number of faces found outside the 0-1 UV range in the last analysis run",
+        default=0,
+    )
+    last_avg_density: FloatProperty(
+        name="Avg Density",
+        description="Average texel density from the last analysis run",
+        default=0.0, precision=4,
+    )
+    last_min_density: FloatProperty(
+        name="Min Density",
+        description="Lowest texel density from the last analysis run",
+        default=0.0, precision=4,
+    )
+    last_max_density: FloatProperty(
+        name="Max Density",
+        description="Highest texel density from the last analysis run",
+        default=0.0, precision=4,
+    )
 
 
 
@@ -535,11 +618,11 @@ class UAVUVPackProperties(PropertyGroup):
         description="Which packing backend to use",
         items=[
             ('BLENDER_NATIVE', "Blender Native",
-             "Blender's built-in Pack Islands operator — reliable baseline"),
+             "Blender's built-in Pack Islands operator - reliable baseline"),
             ('PYTHON',         "Python Solver",
-             "Embedded Skyline / MaxRects in pure Python — no compilation needed"),
+             "Embedded Skyline / MaxRects in pure Python - no compilation needed"),
             ('CPP_NATIVE',     "C++ Native (fast)",
-             "Same algorithm compiled to native C++ — 80-100x faster than Python. "
+             "Same algorithm compiled to native C++ - 80-100x faster than Python. "
              "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
         ],
         default='PYTHON',
@@ -577,7 +660,7 @@ class UAVUVPackProperties(PropertyGroup):
         name="Heuristic",
         description="Scoring function used by MaxRects to choose a free rectangle",
         items=[
-            ('BSSF', "Best Short Side",  "Minimises the shorter leftover side — usually best"),
+            ('BSSF', "Best Short Side",  "Minimizes the shorter leftover side - usually the best default"),
             ('BLSF', "Best Long Side",   "Minimises the longer leftover side"),
             ('BAF',  "Best Area Fit",    "Minimises wasted area in the chosen free rectangle"),
             ('BL',   "Bottom-Left",      "Lowest then leftmost position"),
@@ -595,7 +678,7 @@ class UAVUVPackProperties(PropertyGroup):
              "Physics-inspired optimizer that escapes local optima. "
              "Slower but often finds better solutions"),
             ('NONE',      "None",
-             "No optimisation — area-descending order, no rotation. Fastest"),
+             "No optimization - area-descending order, no rotation. Fastest"),
         ],
         default='ITERATIVE',
     )
@@ -618,10 +701,10 @@ class UAVUVPackProperties(PropertyGroup):
         name="Rotation Step",
         description="Angle increment tested during rotation search",
         items=[
-            ('90', "90°", "Test 0° and 90° only — fast"),
-            ('45', "45°", "Test every 45°"),
-            ('30', "30°", "Test every 30°"),
-            ('15', "15°", "Test every 15° — slowest"),
+            ('90', "90 deg", "Test 0 and 90 degrees only - fastest"),
+            ('45', "45 deg", "Test every 45 degrees"),
+            ('30', "30 deg", "Test every 30 degrees"),
+            ('15', "15 deg", "Test every 15 degrees - slowest"),
         ],
         default='90',
     )
@@ -630,7 +713,7 @@ class UAVUVPackProperties(PropertyGroup):
         description="How to scale islands after packing",
         items=[
             ('MAX_SCALE', "Max Scale",
-             "Scale up to fill the entire UV 0–1 space. Maximises texel density"),
+             "Scale up to fill the entire UV 0-1 space. Maximizes texel density"),
             ('LOCKED',    "Locked",
              "Keep the relative scale from packing; do not enlarge"),
             ('CUSTOM',    "Custom",
@@ -675,14 +758,34 @@ class UAVUVPackProperties(PropertyGroup):
     )
     sa_cooling_rate: FloatProperty(
         name="Cooling Rate",
-        description="Temperature multiplier per step (0.9–0.999)",
+        description="Temperature multiplier per step (0.9-0.999)",
         default=0.997, min=0.9, max=0.9999, precision=4,
     )
-    last_occupancy:  FloatProperty(name="Last Occupancy",   default=0.0, precision=2)
-    last_iterations: IntProperty(  name="Last Iterations",  default=0)
-    last_time:       FloatProperty(name="Last Time",        default=0.0, precision=2)
-    last_method:     StringProperty(name="Last Method",     default="")
-    run_counter:     IntProperty(  name="Run Counter",      default=0)
+    last_occupancy: FloatProperty(
+        name="Last Occupancy",
+        description="Occupancy reached by the last completed packing run",
+        default=0.0, precision=2,
+    )
+    last_iterations: IntProperty(
+        name="Last Iterations",
+        description="Number of iterations executed in the last completed packing run",
+        default=0,
+    )
+    last_time: FloatProperty(
+        name="Last Time",
+        description="Execution time of the last completed packing run",
+        default=0.0, precision=2,
+    )
+    last_method: StringProperty(
+        name="Last Method",
+        description="Packing method or backend used in the last completed run",
+        default="",
+    )
+    run_counter: IntProperty(
+        name="Run Counter",
+        description="How many packing runs have been executed in this session",
+        default=0,
+    )
     best_ever_occupancy: FloatProperty(
         name="Best Ever Occupancy",
         description="Best UV occupancy achieved across all packing runs.",
@@ -767,10 +870,10 @@ class UAVBakeProperties(PropertyGroup):
         name="Texture Size",
         description="Resolution of the output texture",
         items=[
-            ('512',  "512 x 512",   "Low resolution — fast bake"),
+            ('512',  "512 x 512",   "Low resolution - fast bake"),
             ('1024', "1K (1024)",   "Medium resolution"),
-            ('2048', "2K (2048)",   "High resolution — recommended"),
-            ('4096', "4K (4096)",   "Ultra — requires more VRAM and time"),
+            ('2048', "2K (2048)",   "High resolution - recommended"),
+            ('4096', "4K (4096)",   "Ultra - requires more VRAM and time"),
         ],
         default='2048',
     )
@@ -821,41 +924,72 @@ class UAVBakeProperties(PropertyGroup):
     )
 
     # -- Results (read-only display) -----------------------------
-    last_bake_type:  StringProperty(name="Last Type",    default="")
-    last_bake_path:  StringProperty(name="Last Path",    default="")
-    last_bake_time:  FloatProperty( name="Last Time (s)", default=0.0, precision=2)
-    last_bake_count: IntProperty(  name="Last Count",   default=0)
-    last_bake_ok:    BoolProperty(  name="Last OK",      default=False)
+    last_bake_type: StringProperty(
+        name="Last Type",
+        description="Type of map baked in the most recent bake run",
+        default="",
+    )
+    last_bake_path: StringProperty(
+        name="Last Path",
+        description="Output path from the most recent bake run",
+        default="",
+    )
+    last_bake_time: FloatProperty(
+        name="Last Time (s)",
+        description="Execution time of the most recent bake run",
+        default=0.0, precision=2,
+    )
+    last_bake_count: IntProperty(
+        name="Last Count",
+        description="Number of maps produced in the most recent bake run",
+        default=0,
+    )
+    last_bake_ok: BoolProperty(
+        name="Last OK",
+        description="Whether the most recent bake run finished successfully",
+        default=False,
+    )
 
 
 class UAVLODProperties(PropertyGroup):
-    """Parâmetros para geração de LODs. Registrado como Scene.uav_lod_props."""
+    """Parameters for LOD generation. Registered as Scene.uav_lod_props."""
 
     lod_ratio: FloatProperty(
         name="Reduction Ratio",
         description=(
-            "Fração de triângulos mantida a cada nível. "
-            "0.5 = metade por nível (50% → 25% → 12.5% …)"
+            "Fraction of triangles kept at each level. "
+            "0.5 means each new LOD keeps about half of the previous triangle count"
         ),
         default=0.5, min=0.1, max=0.9, precision=2, step=5, subtype='FACTOR',
     )
     lod_min_polycount: IntProperty(
-        name="Min Polycount (LOD final)",
-        description="Polycount alvo do LOD mais simples. A geração para quando este valor é atingido ou ultrapassado",
+        name="Min Polycount (Final LOD)",
+        description="Target triangle count for the simplest generated LOD",
         default=1000, min=4, max=10000000,
     )
     lod_max_levels: IntProperty(
         name="Max Levels",
-        description="Número máximo de LODs a gerar (segurança contra loops infinitos)",
+        description="Maximum number of generated LOD levels",
         default=8, min=1, max=16,
     )
     lod_collection_name: StringProperty(
         name="Collection Name",
-        description="Nome da coleção onde os LODs serão agrupados. Deixe vazio para usar '{nome_objeto}_LODs'",
+        description="Collection used to store generated LOD objects. Leave empty to use '<object>_LODs'",
         default="",
     )
 
-    # -- Preview (read-only, preenchido por UAV_OT_lod_preview) --------------
-    preview_base_tris:  IntProperty(name="Base Tris",   default=0)
-    preview_levels:     IntProperty(name="Levels",      default=0)
-    preview_final_tris: IntProperty(name="Final Tris",  default=0)
+    preview_base_tris: IntProperty(
+        name="Base Tris",
+        description="Triangle count of the source mesh used for the last preview",
+        default=0,
+    )
+    preview_levels: IntProperty(
+        name="Levels",
+        description="How many LOD levels would be generated by the last preview",
+        default=0,
+    )
+    preview_final_tris: IntProperty(
+        name="Final Tris",
+        description="Estimated triangle count of the final generated LOD from the last preview",
+        default=0,
+    )

@@ -1,9 +1,35 @@
+import time
+
 import bpy
 import bmesh
 import numpy as np
 from bpy.types import Operator
 
 from .qem_core import MeshQEM
+
+
+ENGINE_SUFFIXES = {
+    'FAST_DECIMATE': 'FASTDECIMATE',
+    'TRUE_QEM': 'TRUEQEM',
+    'EDGE_LENGTH': 'EDGELENGTH',
+}
+
+ENGINE_LABELS = {
+    'FAST_DECIMATE': 'Fast Decimate',
+    'TRUE_QEM': 'True QEM',
+    'EDGE_LENGTH': 'Edge Length',
+}
+
+
+def _duplicate_mesh_object(source_obj, target_name, target_collection):
+    """Create a single-user object+mesh copy inside the target collection."""
+    new_obj = source_obj.copy()
+    if source_obj.data is not None:
+        new_obj.data = source_obj.data.copy()
+        new_obj.data.name = target_name
+    new_obj.name = target_name
+    target_collection.objects.link(new_obj)
+    return new_obj
 
 
 class UAV_OT_qem_simplify(Operator):
@@ -26,6 +52,7 @@ class UAV_OT_qem_simplify(Operator):
         self.current_task_idx = 0
         self.created_qem_chunks = []
         self.wm = context.window_manager
+        self.start_time = time.perf_counter()
 
         suffix = self.props.qem_collection_suffix.strip() or "QEM_Simplified"
         if self.total_tasks == 1:
@@ -70,12 +97,18 @@ class UAV_OT_qem_simplify(Operator):
                     chunk.select_set(True)
                 if self.created_qem_chunks:
                     context.view_layer.objects.active = self.created_qem_chunks[0]
-                self.report({'INFO'}, f"QEM complete — {self.current_task_idx} objects → '{self.qem_col_name}'")
+                elapsed = time.perf_counter() - self.start_time
+                self.report(
+                    {'INFO'},
+                    f"QEM complete: {self.current_task_idx} object(s) processed, "
+                    f"{len(self.created_qem_chunks)} output mesh(es) in '{self.qem_col_name}' "
+                    f"in {elapsed:.2f}s.",
+                )
                 return {'FINISHED'}
 
         elif event.type == 'ESC':
             self._finish_ui(context)
-            self.report({'WARNING'}, "QEM Cancelled.")
+            self.report({'WARNING'}, "QEM cancelled.")
             return {'CANCELLED'}
 
         return {'PASS_THROUGH'}
@@ -90,40 +123,46 @@ class UAV_OT_qem_simplify(Operator):
         bpy.ops.object.select_all(action='DESELECT')
         original_obj.select_set(True)
         context.view_layer.objects.active = original_obj
-        bpy.ops.object.duplicate()
-        new_obj = context.active_object
-        new_obj.name = f"{original_obj.name}_QEM"
-        new_obj_name = new_obj.name
+
+        temp_name = f"{original_obj.name}_QEM_TMP"
+        new_obj = _duplicate_mesh_object(original_obj, temp_name, self.qem_col)
+        object_start = time.perf_counter()
         try:
             self._pre_cleanup(new_obj)
 
             target_v, current_v, current_tris = self._resolve_target_counts(new_obj)
             if target_v >= current_v:
                 bpy.data.objects.remove(new_obj, do_unlink=True)
-                self.report({'INFO'}, f"QEM skipped '{original_obj.name}' (target already reached).")
+                self.report({'INFO'}, f"QEM skipped '{original_obj.name}' because the target is already reached.")
                 return
 
-            engine = self.props.qem_engine
-            if engine == 'FAST_DECIMATE':
-                self._run_fast_decimate(new_obj, target_v, current_v, current_tris)
+            if self.props.qem_engine == 'FAST_DECIMATE':
+                used_engine = self._run_fast_decimate(new_obj, target_v, current_v, current_tris)
             else:
-                self._run_true_qem(context, new_obj, target_v)
+                used_engine = self._run_true_qem(context, new_obj, target_v)
 
             self._post_cleanup(new_obj)
             self._fix_normals_zup(new_obj)
         except Exception:
-            if new_obj_name in bpy.data.objects:
-                bpy.data.objects.remove(bpy.data.objects[new_obj_name], do_unlink=True)
+            if new_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects[new_obj.name], do_unlink=True)
             context.view_layer.objects.active = original_obj
             original_obj.select_set(True)
             raise
 
+        suffix = ENGINE_SUFFIXES.get(used_engine, used_engine)
+        final_name = f"{original_obj.name}_{suffix}"
+        new_obj.name = final_name
+        if new_obj.data is not None:
+            new_obj.data.name = final_name
+
         original_obj.hide_set(True)
         original_obj.select_set(False)
-        for coll in list(new_obj.users_collection):
-            coll.objects.unlink(new_obj)
-        self.qem_col.objects.link(new_obj)
         self.created_qem_chunks.append(new_obj)
+
+        elapsed = time.perf_counter() - object_start
+        engine_label = ENGINE_LABELS.get(used_engine, used_engine)
+        self.report({'INFO'}, f"{engine_label} finished on '{original_obj.name}' in {elapsed:.2f}s.")
 
     def _pre_cleanup(self, obj):
         bpy.context.view_layer.objects.active = obj
@@ -148,7 +187,7 @@ class UAV_OT_qem_simplify(Operator):
         bm_n.from_mesh(obj.data)
         bm_n.normal_update()
         if bm_n.faces:
-            avg_z = sum(f.normal.z for f in bm_n.faces) / len(bm_n.faces)
+            avg_z = sum(face.normal.z for face in bm_n.faces) / len(bm_n.faces)
             if avg_z < 0:
                 bmesh.ops.reverse_faces(bm_n, faces=bm_n.faces)
         bm_n.to_mesh(obj.data)
@@ -159,8 +198,8 @@ class UAV_OT_qem_simplify(Operator):
         bm = bmesh.new()
         bm.from_mesh(obj.data)
         bm.transform(obj.matrix_world)
-        total_area_m2 = sum(f.calc_area() for f in bm.faces)
-        current_tris = sum(max(1, len(f.verts) - 2) for f in bm.faces)
+        total_area_m2 = sum(face.calc_area() for face in bm.faces)
+        current_tris = sum(max(1, len(face.verts) - 2) for face in bm.faces)
         current_v = len(bm.verts)
         bm.free()
 
@@ -190,6 +229,7 @@ class UAV_OT_qem_simplify(Operator):
             mod.delimit = {'SEAM'}
             bpy.context.view_layer.objects.active = obj
             bpy.ops.object.modifier_apply(modifier=mod.name)
+        return 'FAST_DECIMATE'
 
     def _run_true_qem(self, context, obj, target_v):
         bpy.context.view_layer.objects.active = obj
@@ -199,18 +239,17 @@ class UAV_OT_qem_simplify(Operator):
         bmesh.update_edit_mesh(obj.data)
         bpy.ops.object.mode_set(mode='OBJECT')
 
-        verts = np.array([v.co[:] for v in obj.data.vertices], dtype=np.float64)
-        faces = np.array([p.vertices[:] for p in obj.data.polygons], dtype=np.int32)
+        verts = np.array([vertex.co[:] for vertex in obj.data.vertices], dtype=np.float64)
+        faces = np.array([polygon.vertices[:] for polygon in obj.data.polygons], dtype=np.int32)
         if len(faces) == 0:
-            return
+            return self.props.qem_engine
 
         mesh = MeshQEM(verts, faces)
         if mesh.has_boundary() and self.props.qem_boundary_action == 'CANCEL':
             raise RuntimeError("True QEM found open boundaries. Switch boundary handling to Fallback or use Fast Decimate.")
         if mesh.has_boundary() and self.props.qem_boundary_action == 'FALLBACK':
             current_v = len(verts)
-            self._run_fast_decimate(obj, target_v, current_v, len(faces))
-            return
+            return self._run_fast_decimate(obj, target_v, current_v, len(faces))
 
         if self.props.qem_engine == 'EDGE_LENGTH':
             simp = mesh.edge_based_simplification(
@@ -218,6 +257,7 @@ class UAV_OT_qem_simplify(Operator):
                 valence_aware=self.props.qem_valence_aware,
                 preserve_boundary=True,
             )
+            used_engine = 'EDGE_LENGTH'
         else:
             simp = mesh.simplification(
                 target_v=target_v,
@@ -225,13 +265,15 @@ class UAV_OT_qem_simplify(Operator):
                 midpoint=self.props.qem_midpoint_fallback,
                 preserve_boundary=True,
             )
+            used_engine = 'TRUE_QEM'
 
         self._replace_mesh_geometry(context, obj, simp.vs, simp.faces)
+        return used_engine
 
     def _replace_mesh_geometry(self, context, obj, vertices, faces):
         mesh = obj.data
         mesh.clear_geometry()
-        mesh.from_pydata([tuple(map(float, v)) for v in vertices], [], [tuple(map(int, f)) for f in faces])
+        mesh.from_pydata([tuple(map(float, vert)) for vert in vertices], [], [tuple(map(int, face)) for face in faces])
         mesh.update()
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.mode_set(mode='EDIT')

@@ -786,6 +786,7 @@ class UAV_OT_uv_pack_reset(Operator):
     """Reset the stored best occupancy so the next pack starts fresh"""
     bl_idname  = "uav.uv_pack_reset"
     bl_label   = "Reset Best Occupancy"
+    bl_description = "Clear the stored best occupancy for the active object and UV map"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
