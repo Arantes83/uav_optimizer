@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #ifdef _WIN32
   #define UVPACK_API extern "C" __declspec(dllexport)
 #else
@@ -11,6 +13,8 @@ struct UVIsland {
     float w;
     float h;
     float area;
+    const uint8_t* mask_data;
+    int   mask_stride;
 };
 
 struct UVPlacement {
@@ -20,7 +24,7 @@ struct UVPlacement {
     float angle;
 };
 
-enum UVMethod    { UV_MAXRECTS = 0, UV_SKYLINE = 1 };
+enum UVMethod    { UV_MAXRECTS = 0, UV_SKYLINE = 1, UV_PIXEL = 2, UV_HORIZON = 3 };
 enum UVHeuristic { UV_BSSF = 0, UV_BLSF = 1, UV_BAF = 2, UV_BL = 3, UV_CP = 4 };
 enum UVOptimizer { UV_OPT_NONE = 0, UV_OPT_ITERATIVE = 1, UV_OPT_SA = 2 };
 
@@ -32,6 +36,7 @@ struct UVPackConfig {
     int   max_iter;
     float time_limit;
     int   rotation_step;
+    int   resolution;
     float sa_initial_temp;
     float sa_cooling_rate;
     float min_occupancy;

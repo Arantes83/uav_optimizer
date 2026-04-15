@@ -18,184 +18,267 @@ import bmesh
 import math
 import random
 import time
-from collections import defaultdict
-from mathutils import Vector
 from bpy.types import Operator
 from bpy.props import (
     BoolProperty, EnumProperty, FloatProperty, IntProperty,
     StringProperty, FloatVectorProperty,
 )
+from .uv_utils import (
+    _angles,
+    _area,
+    _bounds,
+    _eff_margin,
+    _get_uv_islands,
+    _normalize,
+    _restore,
+    _rotate,
+    _rotdims,
+    _save,
+    _scale,
+    _scale_island_from_center,
+    _translate,
+)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-#  UV ISLAND & GEOMETRY UTILITIES (SHARED)
-# ═══════════════════════════════════════════════════════════════════════════
+_MASK_META = {}
 
-def _get_uv_islands(bm, uv_layer):
-    """Partition UV faces into connected island groups."""
-    EPSILON = 1e-5
-    face_visited = set()
-    islands = []
-    edge_face_map = defaultdict(list)
-    for face in bm.faces:
-        for loop in face.loops:
-            uv0 = loop[uv_layer].uv.copy().freeze()
-            uv1 = loop.link_loop_next[uv_layer].uv.copy().freeze()
-            edge_face_map[loop.edge.index].append((face.index, uv0, uv1))
-
-    face_neighbors = defaultdict(set)
-    for entries in edge_face_map.values():
-        for i in range(len(entries)):
-            for j in range(i + 1, len(entries)):
-                fi, uv0i, uv1i = entries[i]
-                fj, uv0j, uv1j = entries[j]
-                match = (
-                    ((uv0i - uv0j).length < EPSILON and
-                     (uv1i - uv1j).length < EPSILON) or
-                    ((uv0i - uv1j).length < EPSILON and
-                     (uv1i - uv0j).length < EPSILON)
-                )
-                if match:
-                    face_neighbors[fi].add(fj)
-                    face_neighbors[fj].add(fi)
-
-    face_map  = {f.index: f for f in bm.faces}
-    all_faces = set(face_map)
-    while all_faces - face_visited:
-        seed  = next(iter(all_faces - face_visited))
-        stack = [seed]
-        group = set()
-        while stack:
-            fi = stack.pop()
-            if fi in face_visited:
-                continue
-            face_visited.add(fi)
-            group.add(fi)
-            stack.extend(face_neighbors[fi] - face_visited)
-        islands.append([face_map[i] for i in group])
-    return islands
+def _layout_is_out_of_bounds(islands, uv_layer, epsilon=1e-6):
+    """Return True if any island extends outside the 0-1 UV tile."""
+    for faces in islands:
+        min_u, min_v, max_u, max_v = _bounds(faces, uv_layer)
+        if (
+            min_u < -epsilon or min_v < -epsilon or
+            max_u > 1.0 + epsilon or max_v > 1.0 + epsilon
+        ):
+            return True
+    return False
 
 
-def _bounds(faces, ul):
-    """Get AABB of UV island."""
-    mn_u = mn_v = float('inf')
-    mx_u = mx_v = float('-inf')
-    for f in faces:
-        for l in f.loops:
-            u, v = l[ul].uv
-            if u < mn_u: mn_u = u
-            if v < mn_v: mn_v = v
-            if u > mx_u: mx_u = u
-            if v > mx_v: mx_v = v
-    return mn_u, mn_v, mx_u, mx_v
 
-
-def _area(faces, ul):
-    """Compute 2D area of UV faces (shoelace formula)."""
-    a = 0.0
-    for f in faces:
-        uvs = [l[ul].uv for l in f.loops]
-        for i in range(1, len(uvs) - 1):
-            a += abs((uvs[i].x - uvs[0].x) * (uvs[i + 1].y - uvs[0].y) -
-                     (uvs[i + 1].x - uvs[0].x) * (uvs[i].y - uvs[0].y)) * 0.5
-    return a
-
-
-def _normalize(faces, ul):
-    """Move UV island to origin (0,0)."""
-    mn_u, mn_v, mx_u, mx_v = _bounds(faces, ul)
-    for f in faces:
-        for l in f.loops:
-            l[ul].uv.x -= mn_u
-            l[ul].uv.y -= mn_v
-    return mx_u - mn_u, mx_v - mn_v
-
-
-def _rotate(faces, ul, angle_deg):
-    """Rotate UV island around its center by angle_deg degrees."""
-    if abs(angle_deg) < 0.01:
+def _equalize_island_scales(islands, bm, uv_layer, weight):
+    """Pre-scale islands toward a common texel density target."""
+    del bm
+    weight = max(0.0, min(1.0, float(weight)))
+    if weight <= 0.0 or not islands:
         return
-    mn_u, mn_v, mx_u, mx_v = _bounds(faces, ul)
-    cx, cy = (mn_u + mx_u) * 0.5, (mn_v + mx_v) * 0.5
-    rad = math.radians(angle_deg)
-    ca, sa = math.cos(rad), math.sin(rad)
-    for f in faces:
-        for l in f.loops:
-            uv = l[ul].uv
-            dx, dy = uv.x - cx, uv.y - cy
-            uv.x = cx + dx * ca - dy * sa
-            uv.y = cy + dx * sa + dy * ca
-    mn2, mv2, _, _ = _bounds(faces, ul)
-    for f in faces:
-        for l in f.loops:
-            l[ul].uv.x -= mn2
-            l[ul].uv.y -= mv2
+
+    densities = []
+    for faces in islands:
+        area_3d = sum(face.calc_area() for face in faces)
+        area_uv = _area(faces, uv_layer)
+        if area_3d <= 1e-12 or area_uv <= 1e-12:
+            densities.append(None)
+            continue
+        densities.append(math.sqrt(area_uv / area_3d))
+
+    valid = [density for density in densities if density and density > 1e-12]
+    if not valid:
+        return
+
+    target_density = sum(valid) / len(valid)
+    for faces, current_density in zip(islands, densities):
+        if current_density is None or current_density <= 1e-12:
+            continue
+        desired_scale = target_density / current_density
+        factor = desired_scale * weight + 1.0 * (1.0 - weight)
+        if abs(factor - 1.0) > 1e-6:
+            _scale_island_from_center(faces, uv_layer, factor)
 
 
-def _translate(faces, ul, du, dv):
-    """Translate UV island by (du, dv)."""
-    for f in faces:
-        for l in f.loops:
-            l[ul].uv.x += du
-            l[ul].uv.y += dv
+def _mask_size_px(length, res):
+    return max(1, min(res, int(math.ceil(max(0.0, float(length)) * res))))
 
 
-def _scale(faces, ul, sx, sy):
-    """Scale UV island by (sx, sy)."""
-    for f in faces:
-        for l in f.loops:
-            l[ul].uv.x *= sx
-            l[ul].uv.y *= sy
+def _mask_meta(mask):
+    return _MASK_META.get(id(mask), {'w_px': 0, 'h_px': 0, 'pixels': ()})
 
 
-def _save(bm, ul):
-    """Save all UV coordinates for later restore."""
-    return {l.index: l[ul].uv.copy() for f in bm.faces for l in f.loops}
+def _register_mask(mask, w_px, h_px, pixels):
+    _MASK_META[id(mask)] = {
+        'w_px': int(w_px),
+        'h_px': int(h_px),
+        'pixels': tuple(pixels),
+    }
+    return mask
 
 
-def _restore(bm, ul, saved):
-    """Restore UV coordinates from saved state."""
-    for f in bm.faces:
-        for l in f.loops:
-            l[ul].uv = saved[l.index].copy()
+def _extract_island_polygons(faces, uv_layer):
+    return [[(loop[uv_layer].uv.x, loop[uv_layer].uv.y) for loop in face.loops] for face in faces]
 
 
-def _rotdims(w, h, a):
-    """Get rotated dimensions of rectangle at angle a (degrees)."""
-    if abs(a) < 0.01:
-        return w, h
-    if abs(a - 90) < 0.01 or abs(a - 270) < 0.01:
-        return h, w
-    rad = math.radians(a)
-    ca, sa = abs(math.cos(rad)), abs(math.sin(rad))
-    return w * ca + h * sa, w * sa + h * ca
+def _rotate_polygons_to_origin(polygons, angle_deg):
+    if abs(angle_deg) < 0.01:
+        copied = [[(u, v) for u, v in poly] for poly in polygons]
+    else:
+        points = [point for poly in polygons for point in poly]
+        min_u = min(u for u, _ in points)
+        min_v = min(v for _, v in points)
+        max_u = max(u for u, _ in points)
+        max_v = max(v for _, v in points)
+        center_u = (min_u + max_u) * 0.5
+        center_v = (min_v + max_v) * 0.5
+        radians = math.radians(angle_deg)
+        cos_a = math.cos(radians)
+        sin_a = math.sin(radians)
+        copied = []
+        for poly in polygons:
+            rotated = []
+            for u, v in poly:
+                du = u - center_u
+                dv = v - center_v
+                rotated.append((
+                    center_u + du * cos_a - dv * sin_a,
+                    center_v + du * sin_a + dv * cos_a,
+                ))
+            copied.append(rotated)
+
+    all_points = [point for poly in copied for point in poly]
+    min_u = min(u for u, _ in all_points)
+    min_v = min(v for _, v in all_points)
+    max_u = max(u for u, _ in all_points)
+    max_v = max(v for _, v in all_points)
+    shifted = [[(u - min_u, v - min_v) for u, v in poly] for poly in copied]
+    return shifted, max_u - min_u, max_v - min_v
 
 
-def _eff_margin(p):
-    """Convert pixel margin to UV units."""
-    return (p.pixel_margin / p.texture_size
-            if p.pixel_margin_enable and p.texture_size > 0
-            else p.margin)
+def _point_in_triangle(px, py, a, b, c):
+    denom = ((b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1]))
+    if abs(denom) <= 1e-12:
+        return False
+    wa = ((b[1] - c[1]) * (px - c[0]) + (c[0] - b[0]) * (py - c[1])) / denom
+    wb = ((c[1] - a[1]) * (px - c[0]) + (a[0] - c[0]) * (py - c[1])) / denom
+    wc = 1.0 - wa - wb
+    return wa >= -1e-6 and wb >= -1e-6 and wc >= -1e-6
 
 
-def _angles(p):
-    """Build list of rotation angles from property."""
-    if not p.rotation_enable:
-        return [0.0]
-    step = int(p.rotation_step)
-    return [float(a) for a in range(0, 360, step)]
+def _rasterize_polygons(polygons, width, height, res):
+    mask = bytearray(res * res)
+    w_px = _mask_size_px(width, res)
+    h_px = _mask_size_px(height, res)
+    pixels = []
+
+    scale_u = 0.0 if width <= 1e-12 or w_px <= 1 else (w_px - 1) / width
+    scale_v = 0.0 if height <= 1e-12 or h_px <= 1 else (h_px - 1) / height
+
+    for poly in polygons:
+        if len(poly) < 3:
+            continue
+        for tri_index in range(1, len(poly) - 1):
+            tri = (poly[0], poly[tri_index], poly[tri_index + 1])
+            tri_px = []
+            for u, v in tri:
+                x_px = 0.0 if w_px <= 1 else u * scale_u
+                y_px = 0.0 if h_px <= 1 else v * scale_v
+                tri_px.append((x_px, y_px))
+
+            min_col = max(0, int(math.floor(min(x for x, _ in tri_px))))
+            max_col = min(w_px - 1, int(math.ceil(max(x for x, _ in tri_px))))
+            min_row = max(0, int(math.floor(min(y for _, y in tri_px))))
+            max_row = min(h_px - 1, int(math.ceil(max(y for _, y in tri_px))))
+
+            for row in range(min_row, max_row + 1):
+                py = 0.0 if h_px <= 1 else row + 0.5
+                for col in range(min_col, max_col + 1):
+                    px = 0.0 if w_px <= 1 else col + 0.5
+                    if not _point_in_triangle(px, py, tri_px[0], tri_px[1], tri_px[2]):
+                        continue
+                    idx = row * res + col
+                    if not mask[idx]:
+                        mask[idx] = 1
+                        pixels.append((col, row))
+
+    return _register_mask(mask, w_px, h_px, pixels)
 
 
-def _scale_island_from_center(faces, uv_layer, factor):
-    """Scale UV island from its center."""
-    mn_u, mn_v, mx_u, mx_v = _bounds(faces, uv_layer)
-    cx = (mn_u + mx_u) * 0.5
-    cy = (mn_v + mx_v) * 0.5
-    for face in faces:
-        for loop in face.loops:
-            uv = loop[uv_layer].uv
-            uv.x = cx + (uv.x - cx) * factor
-            uv.y = cy + (uv.y - cy) * factor
+def _rasterize_island(faces, uv_layer, res):
+    polygons = _extract_island_polygons(faces, uv_layer)
+    width, height = _bounds(faces, uv_layer)[2:]
+    min_u, min_v, _, _ = _bounds(faces, uv_layer)
+    width -= min_u
+    height -= min_v
+    normalized = [[(u - min_u, v - min_v) for u, v in poly] for poly in polygons]
+    return _rasterize_polygons(normalized, width, height, res)
+
+
+def _pad_mask(island_mask, res, margin_px):
+    if margin_px <= 0:
+        return island_mask
+    meta = _mask_meta(island_mask)
+    padded = bytearray(res * res)
+    pixels = []
+    for col, row in meta['pixels']:
+        new_col = col + margin_px
+        new_row = row + margin_px
+        if new_col < 0 or new_col >= res or new_row < 0 or new_row >= res:
+            continue
+        idx = new_row * res + new_col
+        if not padded[idx]:
+            padded[idx] = 1
+            pixels.append((new_col, new_row))
+    return _register_mask(padded, meta['w_px'] + margin_px * 2, meta['h_px'] + margin_px * 2, pixels)
+
+
+def _mask_fits(atlas_mask, island_mask, res, px, py):
+    meta = _mask_meta(island_mask)
+    for col, row in meta['pixels']:
+        atlas_idx = (py + row) * res + (px + col)
+        if atlas_mask[atlas_idx] and island_mask[row * res + col]:
+            return False
+    return True
+
+
+def _mask_place(atlas_mask, island_mask, res, px, py):
+    meta = _mask_meta(island_mask)
+    for col, row in meta['pixels']:
+        atlas_mask[(py + row) * res + (px + col)] = 1
+
+
+def _mask_find_position(atlas_mask, island_mask, res, island_w_px, island_h_px):
+    if island_w_px > res or island_h_px > res:
+        return None
+    for py in range(0, res - island_h_px + 1):
+        for px in range(0, res - island_w_px + 1):
+            if _mask_fits(atlas_mask, island_mask, res, px, py):
+                return px, py
+    return None
+
+
+def _attempt_pixel(data, order, rots, margin, res):
+    atlas_mask = bytearray(res * res)
+    placements = [None] * len(data)
+    total_area = sum(d['area'] for d in data)
+    margin_px = max(0, int(math.ceil(margin * res)))
+    used_height_px = 0
+
+    for idx in order:
+        rot_entry = data[idx]['rot_masks'][float(rots[idx])]
+        mask = rot_entry['mask']
+        if margin_px > 0:
+            padded_key = f'padded::{margin_px}'
+            if padded_key not in rot_entry:
+                rot_entry[padded_key] = _pad_mask(mask, res, margin_px)
+            use_mask = rot_entry[padded_key]
+        else:
+            use_mask = mask
+
+        meta = _mask_meta(use_mask)
+        pos = _mask_find_position(atlas_mask, use_mask, res, meta['w_px'], meta['h_px'])
+        if pos is None:
+            return None, -1.0
+
+        _mask_place(atlas_mask, use_mask, res, pos[0], pos[1])
+        placements[idx] = {
+            'x': (pos[0] + margin_px) / float(res),
+            'y': (pos[1] + margin_px) / float(res),
+            'angle': float(rots[idx]),
+        }
+        used_height_px = max(used_height_px, pos[1] + meta['h_px'])
+
+    if used_height_px <= 0:
+        return placements, 0.0
+    used_height = used_height_px / float(res)
+    occ = total_area / used_height if used_height > 1e-12 else 0.0
+    return placements, occ
 
 
 def _pack_best_occ_key(obj, uv_layer):
@@ -280,7 +363,7 @@ class _Sky:
 
 class _MR:
     """MaxRects rectangle packing algorithm."""
-    def __init__(self): self.fr=[(0.,0.,1.,100.)]; self.ur=[]
+    def __init__(self): self.fr=[(0.,0.,1.,1e9)]; self.ur=[]
     def insert(self, rw, rh, method='BSSF'):
         bs=None; bp=None
         for (fx,fy,fw,fh) in self.fr:
@@ -335,6 +418,10 @@ class _MR:
 
 def _attempt(data, order, rots, margin, method, sub):
     """Try one packing configuration."""
+    if method in {'PIXEL', 'HORIZON'}:
+        res = data[0].get('pixel_res', 64) if data else 64
+        return _attempt_pixel(data, order, rots, margin, res)
+
     pk = _Sky() if method == 'SKYLINE' else _MR()
     ins = pk.insert if method == 'SKYLINE' else lambda rw, rh: pk.insert(rw, rh, method=sub)
     placements = [None]*len(data)
@@ -343,17 +430,19 @@ def _attempt(data, order, rots, margin, method, sub):
         pw,ph = rw+margin*2, rh+margin*2
         res = ins(pw, ph)
         if res is None:
-            return None, -1.0, 1.0
+            return None, -1.0
         placements[idx] = {'x':res[0]+margin, 'y':res[1]+margin, 'angle':rots[idx]}
     th = pk.height()
-    if th < 1e-9: return placements, 0., 1.
+    if th < 1e-9:
+        return placements, 0.
     occ = sum(d['area'] for d in data) / (1.*th) if th>1e-12 else 0.
-    return placements, occ, 1./max(1.,th)
+    return placements, occ
 
 
 def _iter_opt(data, margin, method, sub, angles, max_iter, tlim, min_occ):
     """Iterative optimization with multiple sort keys."""
     n=len(data); best_occ=min_occ; best=None; it=0; t0=time.time()
+    stop_on_target = min_occ >= 0.0
     keys=[
         lambda d,i:-d[i]['area'],
         lambda d,i:-max(d[i]['w'],d[i]['h']),
@@ -365,9 +454,12 @@ def _iter_opt(data, margin, method, sub, angles, max_iter, tlim, min_occ):
     ]
     def try_it(o,r):
         nonlocal best_occ,best,it; it+=1
-        p,occ,s=_attempt(data,o,r,margin,method,sub)
-        if p is not None and occ>best_occ+1e-6: best_occ=occ; best=(p,r[:],s)
-    def done(): return it>=max_iter or (time.time()-t0)>tlim or best_occ>=0.98
+        p,occ=_attempt(data,o,r,margin,method,sub)
+        if p is not None and occ>best_occ+1e-6:
+            best_occ=occ
+            best=(p,r[:])
+    def done():
+        return it>=max_iter or (time.time()-t0)>tlim or (stop_on_target and best_occ>=0.98)
     for kf in keys:
         if done(): break
         order=sorted(range(n),key=lambda i,k=kf:k(data,i))
@@ -399,15 +491,17 @@ def _iter_opt(data, margin, method, sub, angles, max_iter, tlim, min_occ):
 def _sa_opt(data, margin, method, sub, angles, max_iter, tlim, temp0, cool, min_occ):
     """Simulated Annealing optimization."""
     n=len(data); t0=time.time()
+    stop_on_target = min_occ >= 0.0
     order=sorted(range(n),key=lambda i:-data[i]['area']); rots=[0.]*n
-    p,cur,s=_attempt(data,order,rots,margin,method,sub)
+    p,cur=_attempt(data,order,rots,margin,method,sub)
     best_occ=min_occ; best=None
     if p is not None and cur>best_occ+1e-6:
-        best_occ=cur; best=(p,rots[:],s)
+        best_occ=cur
+        best=(p,rots[:])
     else:
         cur=min_occ
     temp=temp0; it=0
-    while it<max_iter and (time.time()-t0)<tlim and best_occ<0.98:
+    while it<max_iter and (time.time()-t0)<tlim and (not stop_on_target or best_occ<0.98):
         no=order[:]; nr=rots[:]
         if n<2: nr[0]=random.choice(angles)
         else:
@@ -417,7 +511,7 @@ def _sa_opt(data, margin, method, sub, angles, max_iter, tlim, temp0, cool, min_
             elif act<0.8: i,j=random.randint(0,n-1),random.randint(0,n-1); item=no.pop(i); no.insert(j,item)
             else:
                 i,j=sorted(random.sample(range(n),2)); no[i:j+1]=reversed(no[i:j+1])
-        p,new,s=_attempt(data,no,nr,margin,method,sub)
+        p,new=_attempt(data,no,nr,margin,method,sub)
         if p is None:
             temp*=cool; it+=1
             continue
@@ -428,18 +522,20 @@ def _sa_opt(data, margin, method, sub, angles, max_iter, tlim, temp0, cool, min_
             except OverflowError: pass
         if acc:
             order,rots,cur=no,nr,new
-            if cur>best_occ+1e-6: best_occ=cur; best=(p,rots[:],s)
+            if cur>best_occ+1e-6:
+                best_occ=cur
+                best=(p,rots[:])
         temp*=cool; it+=1
     return best, best_occ, it
 
 
-def _apply(bm, ul, islands, data, placements, scale, props, margin):
+def _apply(bm, ul, islands, data, placements, props, margin):
     """Apply packing result to UV islands."""
     for i,faces in enumerate(islands):
         p=placements[i]
         if abs(p['angle'])>0.01: _rotate(faces,ul,p['angle'])
-        _normalize(faces,ul); _scale(faces,ul,scale,scale)
-        _translate(faces,ul,p['x']*scale,p['y']*scale)
+        _normalize(faces,ul)
+        _translate(faces,ul,p['x'],p['y'])
     if props.scale_mode=='MAX_SCALE':
         g0=g1=float('inf'); g2=g3=float('-inf')
         for faces in islands:
@@ -455,13 +551,14 @@ def _apply(bm, ul, islands, data, placements, scale, props, margin):
                 g0=min(g0,a); g1=min(g1,b); g2=max(g2,c); g3=max(g3,d)
             ou=(1.-(g2-g0))*0.5-g0; ov=(1.-(g3-g1))*0.5-g1
             for faces in islands: _translate(faces,ul,ou,ov)
+    elif props.scale_mode=='LOCKED':
+        pass
     elif props.scale_mode=='CUSTOM':
         cf=props.custom_scale
         for faces in islands:
             for f in faces:
                 for l in f.loops:
                     uv=l[ul].uv; uv.x=0.5+(uv.x-0.5)*cf; uv.y=0.5+(uv.y-0.5)*cf
-    return min(sum(_area(f,ul) for f in islands),1.)
 
 
 def run_packing_engine(obj, bm, uv_layer, props, report_fn=None):
@@ -469,30 +566,62 @@ def run_packing_engine(obj, bm, uv_layer, props, report_fn=None):
     t0 = time.time()
     islands = _get_uv_islands(bm, uv_layer)
     if not islands:
-        if report_fn: report_fn({'WARNING'}, "No UV islands found.")
+        if report_fn:
+            report_fn({'WARNING'}, "No UV islands found.")
         return
 
-    n            = len(islands)
-    cur_uvs      = _save(bm, uv_layer)
-    cur_occ      = min(sum(_area(f, uv_layer) for f in islands), 1.)
-    prev_best    = _sync_pack_best_occupancy(props, obj, uv_layer)
-    min_occ      = cur_occ
-    margin       = _eff_margin(props)
-    angs         = _angles(props)
-    max_iter     = props.precision
-    tlim         = props.search_time if props.search_time > 0.01 else 999999.
-    method       = props.packing_method
-    sub          = props.maxrects_heuristic if method == 'MAXRECTS' else ''
+    n = len(islands)
+    cur_uvs = _save(bm, uv_layer)
+    cur_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+    cur_oob = _layout_is_out_of_bounds(islands, uv_layer)
+    prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+    min_occ = -1.0 if cur_oob else cur_occ
+    margin = _eff_margin(props)
+    angs = _angles(props)
+    max_iter = props.precision
+    tlim = props.search_time if props.search_time > 0.01 else 999999.
+    method = props.packing_method
+    sub = props.maxrects_heuristic if method == 'MAXRECTS' else ''
 
     if report_fn:
-        report_fn({'INFO'},
-            f"Found {n} island(s). Current: {cur_occ*100:.1f}%. "
-            f"Best: {prev_best*100:.1f}%. Running {method} + {props.optimizer}…")
+        status_msg = (
+            "Current layout is outside the 0-1 UV tile. Any valid pack result will be applied."
+            if cur_oob else
+            f"Best: {prev_best*100:.1f}%."
+        )
+        report_fn(
+            {'INFO'},
+            f"Found {n} island(s). Current: {cur_occ*100:.1f}%. {status_msg} Running {method} + {props.optimizer}?"
+        )
 
     data = []
     for faces in islands:
+        _normalize(faces, uv_layer)
+    _equalize_island_scales(islands, bm, uv_layer, getattr(props, "density_weight", 0.0))
+    for faces in islands:
         w, h = _normalize(faces, uv_layer)
-        data.append({'w': w, 'h': h, 'area': _area(faces, uv_layer)})
+        entry = {'w': w, 'h': h, 'area': _area(faces, uv_layer)}
+        if method in {'PIXEL', 'HORIZON'}:
+            pixel_res = max(1, int(getattr(props, "pixel_resolution", 64)))
+            polygons = _extract_island_polygons(faces, uv_layer)
+            rot_masks = {}
+            for angle in angs:
+                rotated_polygons, rw, rh = _rotate_polygons_to_origin(polygons, angle)
+                if abs(angle) < 0.01:
+                    mask = _rasterize_island(faces, uv_layer, pixel_res)
+                else:
+                    mask = _rasterize_polygons(rotated_polygons, rw, rh, pixel_res)
+                rot_masks[float(angle)] = {
+                    'mask': mask,
+                    'w': rw,
+                    'h': rh,
+                }
+            entry.update({
+                'mask': rot_masks.get(0.0, {'mask': _rasterize_island(faces, uv_layer, pixel_res)})['mask'],
+                'rot_masks': rot_masks,
+                'pixel_res': pixel_res,
+            })
+        data.append(entry)
     norm_uvs = _save(bm, uv_layer)
 
     props.run_counter += 1
@@ -500,57 +629,95 @@ def run_packing_engine(obj, bm, uv_layer, props, report_fn=None):
 
     if props.optimizer == 'NONE':
         order = sorted(range(n), key=lambda i: -data[i]['area'])
-        rots  = [0.]*n
-        p,occ,s = _attempt(data,order,rots,margin,method,sub)
-        best_result = (p,rots,s) if p is not None and occ>min_occ+1e-6 else None
-        best_occ,iters = (occ if best_result else min_occ), 1
+        rots = [0.] * n
+        p, occ = _attempt(data, order, rots, margin, method, sub)
+        best_result = (
+            (p, rots)
+            if p is not None and (cur_oob or occ > min_occ + 1e-6)
+            else None
+        )
+        best_occ, iters = (occ if best_result else min_occ), 1
     elif props.optimizer == 'ITERATIVE':
-        best_result,best_occ,iters = _iter_opt(data,margin,method,sub,angs,max_iter,tlim,min_occ)
+        best_result, best_occ, iters = _iter_opt(data, margin, method, sub, angs, max_iter, tlim, min_occ)
     else:
-        best_result,best_occ,iters = _sa_opt(data,margin,method,sub,angs,max_iter,tlim,
-                                              props.sa_initial_temp,props.sa_cooling_rate,min_occ)
+        best_result, best_occ, iters = _sa_opt(
+            data, margin, method, sub, angs, max_iter, tlim,
+            props.sa_initial_temp, props.sa_cooling_rate, min_occ
+        )
 
-    if props.advanced_heuristic and best_result and len(angs)>1:
-        pl,rts,sc=best_result; improved=True; rc=0; mr=n*len(angs)*2
-        while improved and rc<mr:
-            improved=False
+    if props.advanced_heuristic and best_result and len(angs) > 1:
+        pl, rts = best_result
+        improved = True
+        rc = 0
+        mr = n * len(angs) * 2
+        while improved and rc < mr:
+            improved = False
             for idx in range(n):
-                if (time.time()-t0)>tlim: break
+                if (time.time() - t0) > tlim:
+                    break
                 for a in angs:
-                    if abs(a-rts[idx])<0.01: continue
-                    tr=rts[:]; tr[idx]=a
-                    order=sorted(range(n),key=lambda i:-data[i]['area'])
-                    p,o,s=_attempt(data,order,tr,margin,method,sub); iters+=1; rc+=1
-                    if p is not None and o>best_occ+1e-6:
-                        best_occ=o; best_result=(p,tr[:],s); rts=tr[:]; improved=True; break
+                    if abs(a - rts[idx]) < 0.01:
+                        continue
+                    tr = rts[:]
+                    tr[idx] = a
+                    order = sorted(range(n), key=lambda i: -data[i]['area'])
+                    p, o = _attempt(data, order, tr, margin, method, sub)
+                    iters += 1
+                    rc += 1
+                    if p is not None and o > best_occ + 1e-6:
+                        best_occ = o
+                        best_result = (p, tr[:])
+                        rts = tr[:]
+                        improved = True
+                        break
 
-    elapsed = time.time()-t0
+    elapsed = time.time() - t0
 
     if best_result:
-        pl,rts,sc = best_result
+        pl, rts = best_result
         _restore(bm, uv_layer, norm_uvs)
-        final_occ = _apply(bm,uv_layer,islands,data,pl,sc,props,margin)
+        _apply(bm, uv_layer, islands, data, pl, props, margin)
+        final_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+        final_oob = _layout_is_out_of_bounds(islands, uv_layer)
         props.best_ever_occupancy = _set_pack_best_occupancy(
             obj, uv_layer, max(prev_best, final_occ))
-        props.last_occupancy  = final_occ*100
+        props.last_occupancy = final_occ * 100
         props.last_iterations = iters
-        props.last_time       = elapsed
-        props.last_method     = f"{method} + {props.optimizer}"
+        props.last_time = elapsed
+        props.last_method = f"{method} + {props.optimizer}"
         if report_fn:
-            report_fn({'INFO'},
-                f"Improved! {final_occ*100:.1f}% "
-                f"(was {min_occ*100:.1f}%) | {iters} iters | {elapsed:.2f}s")
+            if cur_oob:
+                suffix = (
+                    " Result still extends outside 0-1."
+                    if final_oob else
+                    " Layout is back inside the 0-1 UV tile."
+                )
+                report_fn(
+                    {'INFO'},
+                    f"Packed from out-of-bounds layout: {final_occ*100:.1f}% | {iters} iters | {elapsed:.2f}s.{suffix}"
+                )
+            else:
+                report_fn(
+                    {'INFO'},
+                    f"Improved! {final_occ*100:.1f}% (was {cur_occ*100:.1f}%) | {iters} iters | {elapsed:.2f}s"
+                )
     else:
         _restore(bm, uv_layer, cur_uvs)
         props.best_ever_occupancy = prev_best
         props.last_iterations = iters
-        props.last_time       = elapsed
-        props.last_method     = f"{method} + {props.optimizer} (no improvement)"
+        props.last_time = elapsed
+        props.last_method = f"{method} + {props.optimizer} (no improvement)"
         if report_fn:
-            report_fn({'WARNING'},
-                f"No improvement (current: {min_occ*100:.1f}%). "
-                f"Try more precision or a different method. ({iters} iters, {elapsed:.2f}s)")
-
+            if cur_oob:
+                report_fn(
+                    {'WARNING'},
+                    f"No valid pack result found for the out-of-bounds layout. ({iters} iters, {elapsed:.2f}s)"
+                )
+            else:
+                report_fn(
+                    {'WARNING'},
+                    f"No improvement (current: {cur_occ*100:.1f}%). Try more precision or a different method. ({iters} iters, {elapsed:.2f}s)"
+                )
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  OPERATORS
@@ -618,15 +785,14 @@ def run_blender_native_pack(obj, bm, uv_layer, props, report_fn=None):
 def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
     """
     Pack UV islands via DLL C++ (lib_uvpack).
-    O loop de optimização roda em C++ compilado (~80-100x mais rápido que Python).
-    O apply final permanece em Python pois acessa estruturas internas do Blender.
+    The optimisation loop runs in compiled C++; final UV application remains in Python.
     """
     import time
     try:
         from .uvpack_lib import get_lib, UVPackException
     except ImportError as e:
         if report_fn:
-            report_fn({'ERROR'}, f"uvpack_lib não encontrado: {e}")
+            report_fn({'ERROR'}, f"uvpack_lib not found: {e}")
         return
 
     t0 = time.time()
@@ -634,26 +800,57 @@ def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
     islands = _get_uv_islands(bm, uv_layer)
     if not islands:
         if report_fn:
-            report_fn({'WARNING'}, "Nenhuma ilha UV encontrada.")
+            report_fn({'WARNING'}, "No UV islands found.")
         return
 
-    n       = len(islands)
+    n = len(islands)
     cur_uvs = _save(bm, uv_layer)
     cur_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+    cur_oob = _layout_is_out_of_bounds(islands, uv_layer)
     prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
-    min_occ = cur_occ
-    margin  = _eff_margin(props)
+    min_occ = -1.0 if cur_oob else cur_occ
+    margin = _eff_margin(props)
+    angs = _angles(props)
 
     if report_fn:
-        report_fn({'INFO'},
-            f"C++ pack: {n} ilha(s). Atual: {cur_occ*100:.1f}%. "
-            f"Melhor: {prev_best*100:.1f}%. {props.packing_method}+{props.optimizer}…")
+        status_msg = (
+            "Current layout is outside the 0-1 UV tile. Any valid result will be applied."
+            if cur_oob else
+            f"Best: {prev_best*100:.1f}%."
+        )
+        report_fn(
+            {'INFO'},
+            f"C++ pack: {n} island(s). Current: {cur_occ*100:.1f}%. {status_msg} {props.packing_method}+{props.optimizer}?"
+        )
 
-    # Normalizar e montar lista para a DLL
     islands_data = []
+    for faces in islands:
+        _normalize(faces, uv_layer)
+    _equalize_island_scales(islands, bm, uv_layer, getattr(props, "density_weight", 0.0))
     for i, faces in enumerate(islands):
         w, h = _normalize(faces, uv_layer)
-        islands_data.append({'id': i, 'w': w, 'h': h, 'area': _area(faces, uv_layer)})
+        entry = {'id': i, 'w': w, 'h': h, 'area': _area(faces, uv_layer)}
+        if props.packing_method in {'PIXEL', 'HORIZON'}:
+            pixel_res = max(1, int(getattr(props, "pixel_resolution", 64)))
+            polygons = _extract_island_polygons(faces, uv_layer)
+            rot_masks = {}
+            for angle in angs:
+                rotated_polygons, rw, rh = _rotate_polygons_to_origin(polygons, angle)
+                if abs(angle) < 0.01:
+                    mask = _rasterize_island(faces, uv_layer, pixel_res)
+                else:
+                    mask = _rasterize_polygons(rotated_polygons, rw, rh, pixel_res)
+                rot_masks[float(angle)] = {
+                    'mask': mask,
+                    'w': rw,
+                    'h': rh,
+                }
+            entry.update({
+                'mask': rot_masks.get(0.0, {'mask': _rasterize_island(faces, uv_layer, pixel_res)})['mask'],
+                'rot_masks': rot_masks,
+                'pixel_res': pixel_res,
+            })
+        islands_data.append(entry)
     norm_uvs = _save(bm, uv_layer)
 
     try:
@@ -667,72 +864,72 @@ def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
 
     elapsed = time.time() - t0
 
-    if best_occ <= min_occ + 1e-6:
+    if (cur_oob and best_occ < 0.0) or ((not cur_oob) and best_occ <= min_occ + 1e-6):
         _restore(bm, uv_layer, cur_uvs)
         props.best_ever_occupancy = prev_best
         props.last_iterations = props.precision
-        props.last_time       = elapsed
-        props.last_method     = f"C++ {props.packing_method}+{props.optimizer} (sem melhora)"
+        props.last_time = elapsed
+        props.last_method = f"C++ {props.packing_method}+{props.optimizer} (no improvement)"
         if report_fn:
-            report_fn({'WARNING'},
-                f"Sem melhora (atual: {min_occ*100:.1f}%). ({elapsed:.2f}s)")
+            if cur_oob:
+                report_fn(
+                    {'WARNING'},
+                    f"No valid C++ pack result was found for the out-of-bounds layout. ({elapsed:.2f}s)"
+                )
+            else:
+                report_fn(
+                    {'WARNING'},
+                    f"No improvement (current: {cur_occ*100:.1f}%). ({elapsed:.2f}s)"
+                )
         return
 
-    # Apply: restaurar UVs normalizados e aplicar placements
     _restore(bm, uv_layer, norm_uvs)
-    # scale=1.0: coordenadas da DLL ja estao em espaco [0,1] de largura.
-    # O bloco MAX_SCALE abaixo normaliza a altura se ultrapassar 1.
-    pl_map = {p['id']: p for p in placements}
+    placement_map = {p['id']: p for p in placements}
+    missing_ids = [i for i in range(n) if i not in placement_map]
+    if missing_ids:
+        _restore(bm, uv_layer, cur_uvs)
+        props.best_ever_occupancy = prev_best
+        props.last_iterations = props.precision
+        props.last_time = elapsed
+        props.last_method = f"C++ {props.packing_method}+{props.optimizer} (invalid placements)"
+        if report_fn:
+            preview = ", ".join(str(i) for i in missing_ids[:8])
+            suffix = "..." if len(missing_ids) > 8 else ""
+            report_fn(
+                {'ERROR'},
+                "C++ pack returned invalid placement ids. "
+                f"Missing islands: {preview}{suffix}. "
+                "This usually means lib_uvpack.dll is out of sync with the addon files."
+            )
+        return
 
-    for i, faces in enumerate(islands):
-        p = pl_map[i]
-        if abs(p['angle']) > 0.01:
-            _rotate(faces, uv_layer, p['angle'])
-        _normalize(faces, uv_layer)
-        _translate(faces, uv_layer, p['x'], p['y'])
-
-    # Escala final (mesmo comportamento do solver Python)
-    if props.scale_mode == 'MAX_SCALE':
-        g0=g1=float('inf'); g2=g3=float('-inf')
-        for faces in islands:
-            a, b, c, d = _bounds(faces, uv_layer)
-            g0=min(g0,a); g1=min(g1,b); g2=max(g2,c); g3=max(g3,d)
-        cw, ch = g2-g0, g3-g1
-        if cw > 1e-9 and ch > 1e-9:
-            tgt = max(0.1, 1. - margin*2)
-            sf  = min(tgt/cw, tgt/ch)
-            for faces in islands:
-                _translate(faces, uv_layer, -g0, -g1)
-                _scale(faces, uv_layer, sf, sf)
-            g0=g1=float('inf'); g2=g3=float('-inf')
-            for faces in islands:
-                a, b, c, d = _bounds(faces, uv_layer)
-                g0=min(g0,a); g1=min(g1,b); g2=max(g2,c); g3=max(g3,d)
-            ou = (1.-(g2-g0))*0.5 - g0
-            ov = (1.-(g3-g1))*0.5 - g1
-            for faces in islands:
-                _translate(faces, uv_layer, ou, ov)
-    elif props.scale_mode == 'CUSTOM':
-        cf = props.custom_scale
-        for faces in islands:
-            for f in faces:
-                for l in f.loops:
-                    uv = l[uv_layer].uv
-                    uv.x = 0.5 + (uv.x - 0.5) * cf
-                    uv.y = 0.5 + (uv.y - 0.5) * cf
-
+    ordered_placements = [placement_map[i] for i in range(n)]
+    _apply(bm, uv_layer, islands, islands_data, ordered_placements, props, margin)
     final_occ = min(sum(_area(f, uv_layer) for f in islands), 1.)
+    final_oob = _layout_is_out_of_bounds(islands, uv_layer)
     props.best_ever_occupancy = _set_pack_best_occupancy(
         obj, uv_layer, max(prev_best, final_occ))
-    props.last_occupancy  = final_occ * 100.
+    props.last_occupancy = final_occ * 100.
     props.last_iterations = props.precision
-    props.last_time       = elapsed
-    props.last_method     = f"C++ {props.packing_method}+{props.optimizer}"
+    props.last_time = elapsed
+    props.last_method = f"C++ {props.packing_method}+{props.optimizer}"
 
     if report_fn:
-        report_fn({'INFO'},
-            f"C++ pack OK! {final_occ*100:.1f}% "
-            f"(era {min_occ*100:.1f}%) | {elapsed:.2f}s")
+        if cur_oob:
+            suffix = (
+                " Result still extends outside 0-1."
+                if final_oob else
+                " Layout is back inside the 0-1 UV tile."
+            )
+            report_fn(
+                {'INFO'},
+                f"C++ pack applied from out-of-bounds layout: {final_occ*100:.1f}% | {elapsed:.2f}s.{suffix}"
+            )
+        else:
+            report_fn(
+                {'INFO'},
+                f"C++ pack OK! {final_occ*100:.1f}% (was {cur_occ*100:.1f}%) | {elapsed:.2f}s"
+            )
 
 
 class UAV_OT_uv_pack(Operator):

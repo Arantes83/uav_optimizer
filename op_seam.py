@@ -12,10 +12,10 @@ def _world_plane_to_local(obj, plane_co_world, plane_no_world):
     plane_no_local = (normal_matrix @ mathutils.Vector(plane_no_world)).normalized()
     return plane_co_local, plane_no_local
 
-class UAV_OT_split_chunks(Operator):
-    bl_idname = "uav.split_chunks"
+class UAV_OT_trace_grid_seams(Operator):
+    bl_idname = "uav.trace_grid_seams"
     bl_label = "Trace Grid Seams"
-    bl_description = "Slices the mesh mathematically to trace grid seams for UV islands without separating the object"
+    bl_description = "Slices the mesh mathematically along X/Y/Z to trace grid seams for UV islands without separating the object"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -26,6 +26,7 @@ class UAV_OT_split_chunks(Operator):
         self.props = context.scene.uav_props
         self.rows  = self.props.chunk_rows
         self.cols  = self.props.chunk_cols
+        self.levels = self.props.chunk_levels
 
         self.obj = context.active_object
         self.wm  = context.window_manager
@@ -37,22 +38,32 @@ class UAV_OT_split_chunks(Operator):
         bbox     = [self.obj.matrix_world @ mathutils.Vector(c) for c in self.obj.bound_box]
         x_coords = [v.x for v in bbox]
         y_coords = [v.y for v in bbox]
+        z_coords = [v.z for v in bbox]
 
         self.x_min, self.x_max = min(x_coords), max(x_coords)
         self.y_min, self.y_max = min(y_coords), max(y_coords)
+        self.z_min, self.z_max = min(z_coords), max(z_coords)
 
         self.x_step = (self.x_max - self.x_min) / self.cols
         self.y_step = (self.y_max - self.y_min) / self.rows
+        self.z_step = (self.z_max - self.z_min) / self.levels
 
         # Internal grid lines only (cols=4 - 3 cuts on X)
         self.x_cuts = [self.x_min + i * self.x_step for i in range(1, self.cols)]
         self.y_cuts = [self.y_min + j * self.y_step for j in range(1, self.rows)]
+        self.z_cuts = [self.z_min + k * self.z_step for k in range(1, self.levels)]
 
-        self.total_tasks    = len(self.x_cuts) + len(self.y_cuts)
+        self.cut_tasks = (
+            [((cut_x, 0.0, 0.0), (1.0, 0.0, 0.0)) for cut_x in self.x_cuts]
+            + [((0.0, cut_y, 0.0), (0.0, 1.0, 0.0)) for cut_y in self.y_cuts]
+            + [((0.0, 0.0, cut_z), (0.0, 0.0, 1.0)) for cut_z in self.z_cuts]
+        )
+
+        self.total_tasks    = len(self.cut_tasks)
         self.current_task_idx = 0
 
         if self.total_tasks == 0:
-            self.report({'WARNING'}, "Grid is set to 1x1. No seams to trace.")
+            self.report({'WARNING'}, "Grid is set to 1x1x1. No seams to trace.")
             return {'CANCELLED'}
 
         self.wm.progress_begin(0, self.total_tasks)
@@ -67,7 +78,7 @@ class UAV_OT_split_chunks(Operator):
         self._timer = self.wm.event_timer_add(interval, window=context.window)
         self.wm.modal_handler_add(self)
 
-        self.report({'INFO'}, f"Tracing {self.total_tasks} grid seams (interval: {interval:.3f}s)...")
+        self.report({'INFO'}, f"Tracing {self.total_tasks} grid seams in X/Y/Z (interval: {interval:.3f}s)...")
         return {'RUNNING_MODAL'}
 
     def modal(self, context, event):
@@ -78,28 +89,15 @@ class UAV_OT_split_chunks(Operator):
                 # creates new verts/edges/faces that must be included in the
                 # next pass. This is unavoidable with bmesh.ops.bisect_plane.
                 geom = self.bm.verts[:] + self.bm.edges[:] + self.bm.faces[:]
-
-                if self.current_task_idx < len(self.x_cuts):
-                    cut_x = self.x_cuts[self.current_task_idx]
-                    plane_co, plane_no = _world_plane_to_local(
-                        self.obj, (cut_x, 0.0, 0.0), (1.0, 0.0, 0.0)
-                    )
-                    res   = bmesh.ops.bisect_plane(
-                        self.bm, geom=geom,
-                        plane_co=plane_co, plane_no=plane_no,
-                        clear_inner=False, clear_outer=False
-                    )
-                else:
-                    y_idx = self.current_task_idx - len(self.x_cuts)
-                    cut_y = self.y_cuts[y_idx]
-                    plane_co, plane_no = _world_plane_to_local(
-                        self.obj, (0.0, cut_y, 0.0), (0.0, 1.0, 0.0)
-                    )
-                    res   = bmesh.ops.bisect_plane(
-                        self.bm, geom=geom,
-                        plane_co=plane_co, plane_no=plane_no,
-                        clear_inner=False, clear_outer=False
-                    )
+                plane_co_world, plane_no_world = self.cut_tasks[self.current_task_idx]
+                plane_co, plane_no = _world_plane_to_local(
+                    self.obj, plane_co_world, plane_no_world
+                )
+                res = bmesh.ops.bisect_plane(
+                    self.bm, geom=geom,
+                    plane_co=plane_co, plane_no=plane_no,
+                    clear_inner=False, clear_outer=False
+                )
 
                 # Mark bisection edges as seams
                 for item in res.get('geom_cut', []):

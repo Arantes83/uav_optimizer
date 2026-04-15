@@ -4,6 +4,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(uvpack SHARED uvpack.cpp uvpack.h)
+find_package(OpenMP)
 
 if(MSVC)
     target_compile_options(uvpack PRIVATE /O2 /GL /arch:AVX2)
@@ -18,6 +19,10 @@ else()
         set_target_properties(uvpack PROPERTIES
             OUTPUT_NAME "lib_uvpack" PREFIX "lib" SUFFIX ".so")
     endif()
+endif()
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(uvpack PRIVATE OpenMP::OpenMP_CXX)
 endif()
 
 # Instala direto para o addon

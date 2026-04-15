@@ -12,11 +12,16 @@ This module intentionally keeps only:
 
 import math
 import time
-from collections import defaultdict
 
 import bmesh
 import bpy
 from bpy.types import Operator
+from .uv_utils import (
+    _area as _area_uv,
+    _bounds as _bounds_uv,
+    _get_uv_islands,
+    _scale_island_from_center,
+)
 
 EPSILON = 1e-12
 
@@ -27,84 +32,6 @@ def _ensure_uv_layer(bm):
     if uv_layer is None:
         uv_layer = bm.loops.layers.uv.new("UVMap")
     return uv_layer
-
-
-def _get_uv_islands(bm, uv_layer):
-    """Partition UV faces into connected island groups."""
-    epsilon = 1e-5
-    face_visited = set()
-    islands = []
-    edge_face_map = defaultdict(list)
-
-    for face in bm.faces:
-        for loop in face.loops:
-            uv0 = loop[uv_layer].uv.copy().freeze()
-            uv1 = loop.link_loop_next[uv_layer].uv.copy().freeze()
-            edge_face_map[loop.edge.index].append((face.index, uv0, uv1))
-
-    face_neighbors = defaultdict(set)
-    for entries in edge_face_map.values():
-        for i in range(len(entries)):
-            for j in range(i + 1, len(entries)):
-                face_i, uv0_i, uv1_i = entries[i]
-                face_j, uv0_j, uv1_j = entries[j]
-                same_direction = (
-                    (uv0_i - uv0_j).length < epsilon and
-                    (uv1_i - uv1_j).length < epsilon
-                )
-                opposite_direction = (
-                    (uv0_i - uv1_j).length < epsilon and
-                    (uv1_i - uv0_j).length < epsilon
-                )
-                if same_direction or opposite_direction:
-                    face_neighbors[face_i].add(face_j)
-                    face_neighbors[face_j].add(face_i)
-
-    face_map = {face.index: face for face in bm.faces}
-    all_faces = set(face_map)
-    while all_faces - face_visited:
-        seed = next(iter(all_faces - face_visited))
-        stack = [seed]
-        group = set()
-        while stack:
-            face_index = stack.pop()
-            if face_index in face_visited:
-                continue
-            face_visited.add(face_index)
-            group.add(face_index)
-            stack.extend(face_neighbors[face_index] - face_visited)
-        islands.append([face_map[index] for index in group])
-
-    return islands
-
-
-def _bounds_uv(faces, uv_layer):
-    """Get the UV bounds for a list of faces."""
-    min_u = min_v = float("inf")
-    max_u = max_v = float("-inf")
-
-    for face in faces:
-        for loop in face.loops:
-            u, v = loop[uv_layer].uv
-            min_u = min(min_u, u)
-            min_v = min(min_v, v)
-            max_u = max(max_u, u)
-            max_v = max(max_v, v)
-
-    return min_u, min_v, max_u, max_v
-
-
-def _area_uv(faces, uv_layer):
-    """Compute UV area with a fan triangulation."""
-    area = 0.0
-    for face in faces:
-        uvs = [loop[uv_layer].uv for loop in face.loops]
-        for index in range(1, len(uvs) - 1):
-            area += abs(
-                (uvs[index].x - uvs[0].x) * (uvs[index + 1].y - uvs[0].y) -
-                (uvs[index + 1].x - uvs[0].x) * (uvs[index].y - uvs[0].y)
-            ) * 0.5
-    return area
 
 
 def _area_3d(faces):
@@ -118,19 +45,6 @@ def _island_density(faces, uv_layer):
     area_uv = _area_uv(faces, uv_layer)
     density = math.sqrt(area_uv / area_3d) if area_3d > EPSILON else 0.0
     return area_3d, area_uv, density
-
-
-def _scale_island_from_center(faces, uv_layer, factor):
-    """Scale an island around its own bounds center."""
-    min_u, min_v, max_u, max_v = _bounds_uv(faces, uv_layer)
-    center_u = (min_u + max_u) * 0.5
-    center_v = (min_v + max_v) * 0.5
-
-    for face in faces:
-        for loop in face.loops:
-            uv = loop[uv_layer].uv
-            uv.x = center_u + (uv.x - center_u) * factor
-            uv.y = center_v + (uv.y - center_v) * factor
 
 
 def _face_area_ratio(face, uv_layer):

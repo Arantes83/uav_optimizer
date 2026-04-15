@@ -145,7 +145,7 @@ Arquivos principais:
 - `op_quadwild.py`
 - `op_shrinkwrap.py`
 - `op_voxel.py`
-- `op_chunk.py`
+- `op_seam.py`
 - `op_uv.py`
 - `op_packing.py`
 - `op_bake.py`

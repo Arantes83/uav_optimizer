@@ -250,6 +250,11 @@ class UAVOptimizerProperties(PropertyGroup):
         description="Number of horizontal slices along the Y-axis to mathematically cut the mesh and trace UV seams",
         default=2, min=1, max=100
     )
+    chunk_levels: IntProperty(
+        name="Levels (Z)",
+        description="Number of depth slices along the Z-axis to mathematically cut the mesh and trace UV seams",
+        default=1, min=1, max=100
+    )
     chunk_timer_interval: FloatProperty(
         name="Timer Interval (s)",
         description="Seconds between each bisect cut in the modal loop. Lower = faster total time but less UI responsiveness on heavy meshes",
@@ -653,6 +658,11 @@ class UAVUVPackProperties(PropertyGroup):
             ('SKYLINE',  "Skyline",
              "Skyline Bottom-Left: fast heuristic that maintains a horizon line. "
              "Good results with lower overhead"),
+            ('PIXEL',    "Pixel Perfect",
+             "Rasterized island packing with pixel-accurate overlap tests"),
+            ('HORIZON',  "Horizon Best Fit",
+             "Mask-based horizon search that scores candidate placements to minimize final atlas height. "
+             "Best choice when you want the packer to occupy as much UV space as possible"),
         ],
         default='MAXRECTS',
     )
@@ -726,6 +736,11 @@ class UAVUVPackProperties(PropertyGroup):
         description="Manual scale factor applied after packing (Scale Mode = Custom)",
         default=1.0, min=0.01, max=10.0, precision=3,
     )
+    density_weight: FloatProperty(
+        name="Density Weight",
+        description="Blend between the current UV scale and a texel-density-aware island scale",
+        default=0.0, min=0.0, max=1.0, precision=2,
+    )
     pixel_margin_enable: BoolProperty(
         name="Pixel Margin",
         description="Define margin in pixels instead of UV units",
@@ -740,6 +755,11 @@ class UAVUVPackProperties(PropertyGroup):
         name="Texture Size",
         description="Target texture resolution used to convert pixel margin to UV units",
         default=1024, min=64, max=8192,
+    )
+    pixel_resolution: IntProperty(
+        name="Pixel Resolution",
+        description="Resolution of the pixel-accurate raster mask used by the Pixel Perfect solver",
+        default=64, min=32, max=256,
     )
     search_time: FloatProperty(
         name="Search Time (s)",

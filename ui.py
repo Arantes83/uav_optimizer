@@ -155,11 +155,12 @@ class UAV_PT_main_panel(Panel):
         # -- 4. Grid Seams --------------------------------------------
         box = layout.box()
         if self._draw_foldout_header(box, props, "ui_show_grid_seams", "4. Generate UV Grid Seams", icon='MESH_GRID'):
-            row = box.row()
+            row = box.row(align=True)
             row.prop(props, "chunk_cols", text="Cols (X)")
             row.prop(props, "chunk_rows", text="Rows (Y)")
+            row.prop(props, "chunk_levels", text="Levels (Z)")
             box.prop(props, "chunk_timer_interval", text="Timer Interval (s)")
-            box.operator("uav.split_chunks", icon='MOD_BOOLEAN', text="Trace Grid Seams")
+            box.operator("uav.trace_grid_seams", icon='MOD_BOOLEAN', text="Trace Grid Seams")
 
         # -- 5. UV Unwrapping -----------------------------------------
         box = layout.box()
@@ -378,11 +379,12 @@ class UAV_PT_main_panel(Panel):
         if uvp.pack_engine == 'BLENDER_NATIVE':
             col.prop(uvp, "native_shape_method",   text="Shape")
             col.prop(uvp, "native_merge_overlap",  text="Merge Overlap")
-            col.prop(uvp, "rotation_enable",       text="Allow Rotation")
         else:
             col.prop(uvp, "packing_method",      text="Algorithm")
             if uvp.packing_method == 'MAXRECTS':
                 col.prop(uvp, "maxrects_heuristic", text="Heuristic")
+            elif uvp.packing_method in {'PIXEL', 'HORIZON'}:
+                col.prop(uvp, "pixel_resolution", text="Pixel Resolution")
 
             col.prop(uvp, "optimizer",       text="Optimizer")
         col.prop(uvp, "precision",       text="Precision")
@@ -394,6 +396,8 @@ class UAV_PT_main_panel(Panel):
         col.prop(uvp, "scale_mode", text="Scale Mode")
         if uvp.scale_mode == 'CUSTOM':
             col.prop(uvp, "custom_scale", text="Custom Scale")
+        if uvp.pack_engine != 'BLENDER_NATIVE':
+            col.prop(uvp, "density_weight", text="Density Weight")
 
         col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
         if uvp.pixel_margin_enable:

@@ -41,23 +41,26 @@ for _d in (_dll_dir, _uvpack_dll_dir):
 if "bpy" in locals():
     import importlib
     from . import (
-        properties, qem_core, op_preprocess, op_qem, op_quadriflow, op_quadwild,
-        op_shrinkwrap, op_voxel, op_chunk, op_uv, op_packing, op_bake, op_lod, ui,
+        properties, qem_core, uv_utils, op_preprocess, op_qem, op_quadriflow, op_quadwild,
+        op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, ui,
     )
     importlib.reload(properties)
     importlib.reload(qem_core)
+    importlib.reload(uv_utils)
     importlib.reload(op_preprocess)
     importlib.reload(op_qem)
     importlib.reload(op_quadriflow)
     importlib.reload(op_quadwild)
     importlib.reload(op_shrinkwrap)
     importlib.reload(op_voxel)
-    importlib.reload(op_chunk)
+    importlib.reload(op_seam)
     importlib.reload(op_uv)
     importlib.reload(op_packing)
     importlib.reload(op_bake)
     importlib.reload(op_lod)
     importlib.reload(ui)
+
+from . import uv_utils
 
 from .properties import (
     UAVOptimizerProperties, UAVQuadWildProperties,
@@ -78,7 +81,7 @@ from .op_quadriflow import UAV_OT_quadriflow
 from .op_quadwild   import UAV_OT_quadwild
 from .op_shrinkwrap import UAV_OT_shrinkwrap_retopo
 from .op_voxel      import UAV_OT_voxel_retopo
-from .op_chunk      import UAV_OT_split_chunks
+from .op_seam       import UAV_OT_trace_grid_seams
 
 classes = (
     # PropertyGroups must come before any operator or panel that uses them
@@ -103,7 +106,7 @@ classes = (
     UAV_OT_voxel_retopo,
 
     # UV & Unwrapping
-    UAV_OT_split_chunks,
+    UAV_OT_trace_grid_seams,
     UAV_OT_uv_unwrap,
     UAV_OT_uv_equalize_texel,
     UAV_OT_uv_island_stats,
@@ -126,6 +129,10 @@ SCENE_PROPS = (
     ("uav_std_uv_props", UAVUVStandardMethodsProperties),
 )
 
+LEGACY_CLASS_NAMES = (
+    "UAV_OT_split_chunks",
+)
+
 
 def _safe_unregister_class(cls):
     registered_cls = getattr(bpy.types, cls.__name__, None)
@@ -137,6 +144,16 @@ def _safe_unregister_class(cls):
             return
         except (RuntimeError, ValueError):
             continue
+
+
+def _safe_unregister_class_name(class_name):
+    registered_cls = getattr(bpy.types, class_name, None)
+    if registered_cls is None:
+        return
+    try:
+        bpy.utils.unregister_class(registered_cls)
+    except (RuntimeError, ValueError):
+        pass
 
 
 def _safe_register_class(cls):
@@ -176,6 +193,9 @@ def register():
 def unregister():
     for name, _prop_type in reversed(SCENE_PROPS):
         _safe_unregister_scene_prop(name)
+
+    for class_name in LEGACY_CLASS_NAMES:
+        _safe_unregister_class_name(class_name)
 
     for cls in reversed(classes):
         _safe_unregister_class(cls)
