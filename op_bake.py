@@ -10,6 +10,7 @@ from bpy.types import Operator
 
 TMP_MAT_SUFFIX = "_UAVBakeTmp"
 TMP_NODE_NAME = "UAV_BakeTarget"
+BAKE_MAT_SUFFIX = "_baking"
 FINAL_NODE_PREFIX = "UAV_Baked_"
 FINAL_UV_NODE_NAME = FINAL_NODE_PREFIX + "UVMap"
 FINAL_AO_MIX_NODE_NAME = FINAL_NODE_PREFIX + "AOMix"
@@ -72,6 +73,7 @@ PBR_MAP_ORDER = (
 )
 
 MANAGED_NODE_NAMES = {
+    TMP_NODE_NAME,
     FINAL_UV_NODE_NAME,
     FINAL_AO_MIX_NODE_NAME,
     FINAL_NORMALMAP_NODE_NAME,
@@ -287,6 +289,67 @@ def _ensure_slots(obj):
             mat = bpy.data.materials.new(obj.name + "_UAVEmpty")
             mat.use_nodes = True
             slot.material = mat
+
+
+def _capture_material_assignment(obj):
+    return {
+        "slot_count": len(obj.material_slots),
+        "materials": [slot.material for slot in obj.material_slots],
+    }
+
+
+def _restore_material_assignment(obj, assignment):
+    if obj is None or assignment is None or obj.name not in bpy.data.objects:
+        return
+
+    target_slot_count = assignment["slot_count"]
+    target_materials = assignment["materials"]
+
+    bpy.ops.object.select_all(action="DESELECT")
+    obj.select_set(True)
+    bpy.context.view_layer.objects.active = obj
+    if obj.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+    while len(obj.material_slots) < target_slot_count:
+        bpy.ops.object.material_slot_add()
+
+    while len(obj.material_slots) > target_slot_count:
+        obj.active_material_index = len(obj.material_slots) - 1
+        bpy.ops.object.material_slot_remove()
+
+    for index, material in enumerate(target_materials):
+        obj.material_slots[index].material = material
+
+
+def _pick_source_material(obj):
+    if obj.active_material is not None:
+        return obj.active_material
+    for slot in obj.material_slots:
+        if slot.material is not None:
+            return slot.material
+    return None
+
+
+def _ensure_bake_material_assigned(lowpoly):
+    _ensure_slots(lowpoly)
+
+    source_material = _pick_source_material(lowpoly)
+    original_materials = {slot.material for slot in lowpoly.material_slots if slot.material is not None}
+    mat_name = lowpoly.name + BAKE_MAT_SUFFIX
+    bake_material = bpy.data.materials.get(mat_name)
+    if bake_material is None or bake_material in original_materials:
+        if source_material is not None:
+            bake_material = source_material.copy()
+            bake_material.name = mat_name
+        else:
+            bake_material = bpy.data.materials.new(mat_name)
+    bake_material.use_nodes = True
+
+    for slot in lowpoly.material_slots:
+        slot.material = bake_material
+
+    return bake_material
 
 
 def _reserve_materials(obj):
@@ -773,11 +836,14 @@ class UAV_OT_detail_baking(Operator):
         start_time = time.perf_counter()
         baked_results = []
         state = _stash_context_state(context)
+        lowpoly_assignment = _capture_material_assignment(lowpoly)
 
         props.last_bake_ok = False
         props.last_bake_count = 0
 
         try:
+            _ensure_bake_material_assigned(lowpoly)
+
             for map_id in bake_queue:
                 image_name = base_name + _map_suffix(map_id)
                 image = _create_bake_image(image_name, size, map_id)
@@ -787,7 +853,6 @@ class UAV_OT_detail_baking(Operator):
                 _ensure_slots(lowpoly)
 
                 hp_slots, hp_orig, hp_copies = _reserve_materials(highpoly)
-                lp_slots, lp_orig, lp_copies = _reserve_materials(lowpoly)
                 try:
                     _prepare_highpoly_for_map(highpoly, map_id)
                     yield 1
@@ -809,7 +874,6 @@ class UAV_OT_detail_baking(Operator):
                         yield 1
 
                 finally:
-                    _restore_materials(lp_slots, lp_orig, lp_copies)
                     _restore_materials(hp_slots, hp_orig, hp_copies)
 
                 out_path = _save_image(image, out_dir, image_name)
@@ -845,6 +909,8 @@ class UAV_OT_detail_baking(Operator):
             yield -1
 
         finally:
+            if not props.last_bake_ok:
+                _restore_material_assignment(lowpoly, lowpoly_assignment)
             _restore_context_state(context, state)
 
     def modal(self, context, event):

@@ -147,6 +147,11 @@ class UAVOptimizerProperties(PropertyGroup):
         description="When the optimal quadric solve is singular, place the merged vertex at the edge midpoint",
         default=True
     )
+    qem_preserve_seams: BoolProperty(
+        name="Preserve Seams",
+        description="Protect UV seam edges during simplification. Disable this for seam-free LiDAR meshes to reduce overhead and simplify more freely",
+        default=True
+    )
     qem_boundary_action: EnumProperty(
         name="Boundary Handling",
         description="The imported mesh_simplification core assumes closed two-manifold topology. Choose how open boundaries are handled",

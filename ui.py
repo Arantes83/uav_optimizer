@@ -116,7 +116,10 @@ class UAV_PT_main_panel(Panel):
                 adv.prop(props, "qem_valence_aware", text="Valence Aware")
                 if props.qem_engine == 'TRUE_QEM':
                     adv.prop(props, "qem_midpoint_fallback", text="Midpoint Fallback")
+                adv.prop(props, "qem_preserve_seams", text="Preserve Seams")
                 adv.prop(props, "qem_boundary_action", text="Boundary Handling")
+            else:
+                box.prop(props, "qem_preserve_seams", text="Preserve Seams")
 
             col = box.column(align=True)
             col.prop(props, "qem_merge_distance",       text="Pre-Merge Distance")

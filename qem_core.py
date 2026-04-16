@@ -13,7 +13,7 @@ class MeshQEM:
     in-memory vertex/face arrays instead of file IO.
     """
 
-    def __init__(self, vertices, faces):
+    def __init__(self, vertices, faces, protected_edges=None):
         self.vs = np.asarray(vertices, dtype=np.float64).copy()
         self.faces = np.asarray(faces, dtype=np.int32).copy()
         if self.faces.ndim != 2 or self.faces.shape[1] != 3:
@@ -21,9 +21,11 @@ class MeshQEM:
         self.compute_face_normals()
         self.compute_face_center()
         self.build_topology()
+        self.protected_edges = self._sanitize_edges(protected_edges)
         self.simp = False
         self.pool_hash = []
         self.unpool_hash = {}
+        self.face_sources = []
 
     def compute_face_normals(self):
         if len(self.faces) == 0:
@@ -71,6 +73,44 @@ class MeshQEM:
     def has_boundary(self):
         return any(len(fs) != 2 for fs in self.edge_faces.values())
 
+    def _sanitize_edges(self, edges):
+        if not edges:
+            return set()
+        clean = set()
+        for edge in edges:
+            if edge is None or len(edge) != 2:
+                continue
+            v0 = int(edge[0])
+            v1 = int(edge[1])
+            if v0 == v1:
+                continue
+            edge_key = tuple(sorted((v0, v1)))
+            if edge_key in self.edge_faces:
+                clean.add(edge_key)
+        return clean
+
+    @staticmethod
+    def _edge_key(v0, v1):
+        return tuple(sorted((int(v0), int(v1))))
+
+    @classmethod
+    def _is_protected_edge(cls, protected_edges, v0, v1):
+        return cls._edge_key(v0, v1) in protected_edges
+
+    @classmethod
+    def _remap_protected_edges(cls, protected_edges, keep_vertex, removed_vertex):
+        if not protected_edges:
+            return
+        remapped = set()
+        for v0, v1 in protected_edges:
+            new_v0 = keep_vertex if v0 == removed_vertex else v0
+            new_v1 = keep_vertex if v1 == removed_vertex else v1
+            if new_v0 == new_v1:
+                continue
+            remapped.add(cls._edge_key(new_v0, new_v1))
+        protected_edges.clear()
+        protected_edges.update(remapped)
+
     def simplification(self, target_v, valence_aware=True, midpoint=False, preserve_boundary=True):
         vs, vf, fn, fc, edges = self.vs, self.vf, self.fn, self.fc, self.edges
 
@@ -89,6 +129,8 @@ class MeshQEM:
         E_heap = []
         for e in edges:
             v0, v1 = int(e[0]), int(e[1])
+            if self._is_protected_edge(self.protected_edges, v0, v1):
+                continue
             if preserve_boundary and len(vf[v0].intersection(vf[v1])) != 2:
                 continue
             E_new = self._compute_qem_cost(v0, v1, Q_s, vf, valence_aware, midpoint)
@@ -104,6 +146,8 @@ class MeshQEM:
                 break
             _err, (vi_0, vi_1) = heapq.heappop(E_heap)
             if not vi_mask[vi_0] or not vi_mask[vi_1]:
+                continue
+            if self._is_protected_edge(simp_mesh.protected_edges, vi_0, vi_1):
                 continue
             shared_vv = list(set(simp_mesh.v2v[vi_0]).intersection(set(simp_mesh.v2v[vi_1])))
             merged_faces = simp_mesh.vf[vi_0].intersection(simp_mesh.vf[vi_1])
@@ -131,6 +175,8 @@ class MeshQEM:
         E_heap = []
         for i, e in enumerate(edges):
             v0, v1 = int(e[0]), int(e[1])
+            if self._is_protected_edge(self.protected_edges, v0, v1):
+                continue
             if preserve_boundary and len(vf[v0].intersection(vf[v1])) != 2:
                 continue
             heapq.heappush(E_heap, (float(edge_len[i]), (v0, v1)))
@@ -145,6 +191,8 @@ class MeshQEM:
                 break
             _err, (vi_0, vi_1) = heapq.heappop(E_heap)
             if not vi_mask[vi_0] or not vi_mask[vi_1]:
+                continue
+            if self._is_protected_edge(simp_mesh.protected_edges, vi_0, vi_1):
                 continue
             shared_vv = list(set(simp_mesh.v2v[vi_0]).intersection(set(simp_mesh.v2v[vi_1])))
             merged_faces = simp_mesh.vf[vi_0].intersection(simp_mesh.vf[vi_1])
@@ -214,6 +262,8 @@ class MeshQEM:
         if len(merged_faces):
             fi_mask[np.array(list(merged_faces), dtype=np.int32)] = False
 
+        self._remap_protected_edges(simp_mesh.protected_edges, vi_0, vi_1)
+
         Q_s[vi_0] = Q_s[vi_0] + Q_s[vi_1]
         Q_s[vi_1] = np.zeros((4, 4), dtype=np.float64)
         simp_mesh.vs[vi_0] = self._optimal_vertex_position(
@@ -221,6 +271,8 @@ class MeshQEM:
         )
 
         for vv_i in simp_mesh.v2v[vi_0]:
+            if self._is_protected_edge(simp_mesh.protected_edges, vi_0, vv_i):
+                continue
             merged_local = simp_mesh.vf[vi_0].intersection(simp_mesh.vf[vv_i])
             if preserve_boundary and len(merged_local) != 2:
                 continue
@@ -248,9 +300,13 @@ class MeshQEM:
         if len(merged_faces):
             fi_mask[np.array(list(merged_faces), dtype=np.int32)] = False
 
+        self._remap_protected_edges(simp_mesh.protected_edges, vi_0, vi_1)
+
         simp_mesh.vs[vi_0] = 0.5 * (simp_mesh.vs[vi_0] + simp_mesh.vs[vi_1])
 
         for vv_i in simp_mesh.v2v[vi_0]:
+            if self._is_protected_edge(simp_mesh.protected_edges, vi_0, vv_i):
+                continue
             merged_local = simp_mesh.vf[vi_0].intersection(simp_mesh.vf[vv_i])
             if preserve_boundary and len(merged_local) != 2:
                 continue
@@ -280,6 +336,21 @@ class MeshQEM:
         for i, f in enumerate(simp_mesh.faces):
             simp_mesh.faces[i] = [vert_dict.get(int(f[0]), int(f[0])), vert_dict.get(int(f[1]), int(f[1])), vert_dict.get(int(f[2]), int(f[2]))]
 
+        simp_mesh.face_sources = np.where(fi_mask)[0].astype(np.int32).tolist()
+
+        remapped_protected = set()
+        for v0, v1 in getattr(simp_mesh, "protected_edges", set()):
+            new_v0 = vert_dict.get(int(v0), int(v0))
+            new_v1 = vert_dict.get(int(v1), int(v1))
+            if new_v0 == new_v1:
+                continue
+            map_v0 = face_map.get(int(new_v0), -1)
+            map_v1 = face_map.get(int(new_v1), -1)
+            if map_v0 < 0 or map_v1 < 0:
+                continue
+            remapped_protected.add(MeshQEM._edge_key(map_v0, map_v1))
+        simp_mesh.protected_edges = remapped_protected
+
         simp_mesh.faces = simp_mesh.faces[fi_mask]
         for i, f in enumerate(simp_mesh.faces):
             simp_mesh.faces[i] = [face_map[int(f[0])], face_map[int(f[1])], face_map[int(f[2])]]
@@ -287,6 +358,10 @@ class MeshQEM:
         simp_mesh.compute_face_normals()
         simp_mesh.compute_face_center()
         simp_mesh.build_topology()
+        simp_mesh.protected_edges = {
+            edge for edge in simp_mesh.protected_edges
+            if edge in simp_mesh.edge_faces
+        }
 
     @staticmethod
     def build_hash(simp_mesh, vi_mask, vert_map):

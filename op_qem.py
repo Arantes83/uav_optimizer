@@ -21,6 +21,94 @@ ENGINE_LABELS = {
 }
 
 
+def _collect_mesh_seam_edges(mesh):
+    seam_edges = set()
+    for edge in mesh.edges:
+        if edge.use_seam:
+            seam_edges.add(tuple(sorted((int(edge.vertices[0]), int(edge.vertices[1])))))
+    return seam_edges
+
+
+def _capture_mesh_face_data(mesh):
+    uv_layers = {}
+    for uv_layer in mesh.uv_layers:
+        uv_layers[uv_layer.name] = [
+            [tuple(uv_layer.data[loop_index].uv) for loop_index in poly.loop_indices]
+            for poly in mesh.polygons
+        ]
+
+    active_uv_name = None
+    if mesh.uv_layers.active is not None:
+        active_uv_name = mesh.uv_layers.active.name
+
+    render_uv_name = None
+    for uv_layer in mesh.uv_layers:
+        if getattr(uv_layer, "active_render", False):
+            render_uv_name = uv_layer.name
+            break
+
+    return {
+        "uv_layers": uv_layers,
+        "active_uv_name": active_uv_name,
+        "render_uv_name": render_uv_name,
+        "material_indices": [poly.material_index for poly in mesh.polygons],
+        "smooth_flags": [poly.use_smooth for poly in mesh.polygons],
+    }
+
+
+def _restore_mesh_face_data(mesh, face_sources, mesh_face_data):
+    if not mesh_face_data or face_sources is None:
+        return
+
+    uv_layers_data = mesh_face_data.get("uv_layers", {})
+    uv_layers = {}
+    for layer_name in uv_layers_data:
+        uv_layer = mesh.uv_layers.get(layer_name)
+        if uv_layer is None:
+            uv_layer = mesh.uv_layers.new(name=layer_name)
+        uv_layers[layer_name] = uv_layer
+
+    material_indices = mesh_face_data.get("material_indices", [])
+    smooth_flags = mesh_face_data.get("smooth_flags", [])
+
+    for poly_index, poly in enumerate(mesh.polygons):
+        if poly_index >= len(face_sources):
+            break
+        source_face_index = int(face_sources[poly_index])
+        if 0 <= source_face_index < len(material_indices):
+            poly.material_index = material_indices[source_face_index]
+        if 0 <= source_face_index < len(smooth_flags):
+            poly.use_smooth = smooth_flags[source_face_index]
+
+        for layer_name, uv_source_faces in uv_layers_data.items():
+            if not (0 <= source_face_index < len(uv_source_faces)):
+                continue
+            src_uvs = uv_source_faces[source_face_index]
+            uv_layer = uv_layers[layer_name]
+            for loop_offset, loop_index in enumerate(poly.loop_indices):
+                if loop_offset >= len(src_uvs):
+                    break
+                uv_layer.data[loop_index].uv = src_uvs[loop_offset]
+
+    active_uv_name = mesh_face_data.get("active_uv_name")
+    if active_uv_name:
+        active_layer = mesh.uv_layers.get(active_uv_name)
+        if active_layer is not None:
+            try:
+                mesh.uv_layers.active = active_layer
+            except Exception:
+                pass
+
+    render_uv_name = mesh_face_data.get("render_uv_name")
+    if render_uv_name:
+        render_layer = mesh.uv_layers.get(render_uv_name)
+        if render_layer is not None:
+            try:
+                render_layer.active_render = True
+            except Exception:
+                pass
+
+
 def _duplicate_mesh_object(source_obj, target_name, target_collection):
     """Create a single-user object+mesh copy inside the target collection."""
     new_obj = source_obj.copy()
@@ -226,7 +314,8 @@ class UAV_OT_qem_simplify(Operator):
             mod.decimate_type = 'COLLAPSE'
             mod.ratio = ratio
             mod.use_collapse_triangulate = True
-            mod.delimit = {'SEAM'}
+            if self.props.qem_preserve_seams:
+                mod.delimit = {'SEAM'}
             bpy.context.view_layer.objects.active = obj
             bpy.ops.object.modifier_apply(modifier=mod.name)
         return 'FAST_DECIMATE'
@@ -244,7 +333,9 @@ class UAV_OT_qem_simplify(Operator):
         if len(faces) == 0:
             return self.props.qem_engine
 
-        mesh = MeshQEM(verts, faces)
+        mesh_face_data = _capture_mesh_face_data(obj.data)
+        seam_edges = _collect_mesh_seam_edges(obj.data) if self.props.qem_preserve_seams else set()
+        mesh = MeshQEM(verts, faces, protected_edges=seam_edges)
         if mesh.has_boundary() and self.props.qem_boundary_action == 'CANCEL':
             raise RuntimeError("True QEM found open boundaries. Switch boundary handling to Fallback or use Fast Decimate.")
         if mesh.has_boundary() and self.props.qem_boundary_action == 'FALLBACK':
@@ -267,13 +358,27 @@ class UAV_OT_qem_simplify(Operator):
             )
             used_engine = 'TRUE_QEM'
 
-        self._replace_mesh_geometry(context, obj, simp.vs, simp.faces)
+        self._replace_mesh_geometry(
+            context,
+            obj,
+            simp.vs,
+            simp.faces,
+            seam_edges=getattr(simp, 'protected_edges', set()),
+            face_sources=getattr(simp, 'face_sources', None),
+            mesh_face_data=mesh_face_data,
+        )
         return used_engine
 
-    def _replace_mesh_geometry(self, context, obj, vertices, faces):
+    def _replace_mesh_geometry(self, context, obj, vertices, faces, seam_edges=None, face_sources=None, mesh_face_data=None):
         mesh = obj.data
+        seam_edges = seam_edges or set()
         mesh.clear_geometry()
         mesh.from_pydata([tuple(map(float, vert)) for vert in vertices], [], [tuple(map(int, face)) for face in faces])
+        mesh.update()
+        _restore_mesh_face_data(mesh, face_sources, mesh_face_data)
+        for edge in mesh.edges:
+            edge_key = tuple(sorted((int(edge.vertices[0]), int(edge.vertices[1]))))
+            edge.use_seam = edge_key in seam_edges
         mesh.update()
         bpy.context.view_layer.objects.active = obj
         bpy.ops.object.mode_set(mode='EDIT')
