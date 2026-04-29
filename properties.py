@@ -51,6 +51,11 @@ class UAVOptimizerProperties(PropertyGroup):
         description="Expand or collapse the LOD generation section",
         default=False,
     )
+    ui_show_export: BoolProperty(
+        name="Show Engine Export",
+        description="Expand or collapse the engine export section",
+        default=False,
+    )
 
 
     # ==========================================
@@ -1017,4 +1022,104 @@ class UAVLODProperties(PropertyGroup):
         name="Final Tris",
         description="Estimated triangle count of the final generated LOD from the last preview",
         default=0,
+    )
+
+
+class UAVExportProperties(PropertyGroup):
+    """Parameters for engine export. Registered as Scene.uav_export_props."""
+
+    target_engine: EnumProperty(
+        name="Target Engine",
+        description="Engine preset used for FBX axis, scale and tangent export",
+        items=[
+            ("UNREAL", "Unreal Engine", "Z-up FBX preset with -X forward"),
+            ("UNITY", "Unity", "Y-up FBX preset with -Z forward"),
+        ],
+        default="UNREAL",
+    )
+    scope: EnumProperty(
+        name="Scope",
+        description="Which objects are exported",
+        items=[
+            ("ACTIVE", "Active Object", "Export only the active object"),
+            ("SELECTED", "Selected Objects", "Export all selected mesh, armature and empty objects"),
+            ("LOD_COLLECTION", "LOD Collection", "Export the generated LOD collection"),
+        ],
+        default="LOD_COLLECTION",
+    )
+    output_dir: StringProperty(
+        name="Output Folder",
+        description="Destination folder for the FBX package. Leave empty to use the .blend folder",
+        default="",
+        subtype="DIR_PATH",
+    )
+    asset_name: StringProperty(
+        name="Asset Name",
+        description="Base filename for the exported FBX. Leave empty to derive it from the object or LOD collection",
+        default="",
+    )
+    collection_name: StringProperty(
+        name="LOD Collection",
+        description="Collection exported when Scope is LOD Collection. Leave empty to reuse the LOD stage collection",
+        default="",
+    )
+    global_scale: FloatProperty(
+        name="Global Scale",
+        description="Scale multiplier passed to Blender's FBX exporter",
+        default=1.0, min=0.0001, max=100000.0, precision=4,
+    )
+    include_textures: BoolProperty(
+        name="Copy Material Textures",
+        description="Copy image textures referenced by exported materials next to the FBX package",
+        default=True,
+    )
+    texture_subdir: StringProperty(
+        name="Texture Folder",
+        description="Subfolder used for copied material textures",
+        default="Textures",
+    )
+    apply_modifiers: BoolProperty(
+        name="Apply Modifiers",
+        description="Evaluate mesh modifiers during FBX export",
+        default=True,
+    )
+    export_tangents: BoolProperty(
+        name="Export Tangents",
+        description="Export tangent-space data for normal maps",
+        default=True,
+    )
+    triangulate: BoolProperty(
+        name="Triangulate",
+        description="Triangulate faces during FBX export. Keep off if the engine importer should triangulate",
+        default=False,
+    )
+    use_custom_props: BoolProperty(
+        name="Custom Properties",
+        description="Include Blender custom properties in the FBX metadata",
+        default=False,
+    )
+    last_export_path: StringProperty(
+        name="Last Path",
+        description="FBX path produced by the most recent engine export",
+        default="",
+    )
+    last_texture_dir: StringProperty(
+        name="Last Texture Folder",
+        description="Texture folder produced by the most recent engine export",
+        default="",
+    )
+    last_export_time: FloatProperty(
+        name="Last Time (s)",
+        description="Execution time of the most recent engine export",
+        default=0.0, precision=2,
+    )
+    last_object_count: IntProperty(
+        name="Last Object Count",
+        description="Number of objects exported in the most recent engine export",
+        default=0,
+    )
+    last_export_ok: BoolProperty(
+        name="Last OK",
+        description="Whether the most recent engine export finished successfully",
+        default=False,
     )

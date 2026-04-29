@@ -57,6 +57,7 @@ class UAV_PT_main_panel(Panel):
         uvp    = getattr(scene, "uav_uvpack_props", None)
         bake   = getattr(scene, "uav_bake_props", None)
         lod    = getattr(scene, "uav_lod_props", None)
+        export = getattr(scene, "uav_export_props", None)
         std_uv = getattr(scene, "uav_std_uv_props", None)
 
         missing = [
@@ -66,6 +67,7 @@ class UAV_PT_main_panel(Panel):
                 ("uav_uvpack_props", uvp),
                 ("uav_bake_props", bake),
                 ("uav_lod_props", lod),
+                ("uav_export_props", export),
                 ("uav_std_uv_props", std_uv),
             )
             if value is None
@@ -184,6 +186,11 @@ class UAV_PT_main_panel(Panel):
         box = layout.box()
         if self._draw_foldout_header(box, props, "ui_show_lod", "8. LOD Generation", icon='COMMUNITY'):
             self._draw_lod(box, lod)
+
+        # -- 9. Engine Export -----------------------------------------
+        box = layout.box()
+        if self._draw_foldout_header(box, props, "ui_show_export", "9. Engine Export", icon='EXPORT'):
+            self._draw_export(box, export)
 
     # -----------------------------------------------------------------
     # 7. Baking sub-panel
@@ -485,6 +492,62 @@ class UAV_PT_main_panel(Panel):
         gen_row = box.row(align=True)
         gen_row.scale_y = 1.4
         gen_row.operator("uav.generate_lods", icon='COMMUNITY', text="Generate LODs")
+
+    # -----------------------------------------------------------------
+    # 9. Engine export sub-panel
+    # -----------------------------------------------------------------
+    def _draw_export(self, box, export):
+        col = box.column(align=True)
+        col.use_property_split    = True
+        col.use_property_decorate = False
+
+        col.prop(export, "target_engine", text="Target")
+        col.prop(export, "scope", text="Scope")
+        if export.scope == 'LOD_COLLECTION':
+            col.prop(export, "collection_name", text="LOD Collection")
+        col.prop(export, "output_dir", text="Output Folder")
+        col.prop(export, "asset_name", text="Asset Name")
+
+        box.separator(factor=0.4)
+
+        opt_box = box.box()
+        opt_box.label(text="FBX Package", icon='FILE_3D')
+        opt_col = opt_box.column(align=True)
+        opt_col.use_property_split    = True
+        opt_col.use_property_decorate = False
+        opt_col.prop(export, "global_scale", text="Global Scale")
+        opt_col.prop(export, "apply_modifiers", text="Apply Modifiers")
+        opt_col.prop(export, "export_tangents", text="Tangents")
+        opt_col.prop(export, "triangulate", text="Triangulate")
+        opt_col.prop(export, "use_custom_props", text="Custom Props")
+
+        tex_box = box.box()
+        tex_box.label(text="Textures", icon='TEXTURE')
+        tex_col = tex_box.column(align=True)
+        tex_col.use_property_split    = True
+        tex_col.use_property_decorate = False
+        tex_col.prop(export, "include_textures", text="Copy Textures")
+        if export.include_textures:
+            tex_col.prop(export, "texture_subdir", text="Folder")
+
+        box.separator(factor=0.5)
+        run_row = box.row(align=True)
+        run_row.scale_y = 1.4
+        run_row.operator("uav.export_engine_asset", icon='EXPORT', text="Export FBX Package")
+
+        if export.last_export_ok and export.last_export_path:
+            res_box = box.box()
+            res_col = res_box.column(align=True)
+            row = res_col.row()
+            row.label(text="Last export:", icon='CHECKMARK')
+            row.label(text=f"{export.last_object_count} object(s)")
+            row = res_col.row()
+            row.label(text="Time:")
+            row.label(text=f"{export.last_export_time:.2f}s")
+            res_col.separator(factor=0.2)
+            res_col.label(text=export.last_export_path, icon='FILE_TICK')
+            if export.last_texture_dir:
+                res_col.label(text=export.last_texture_dir, icon='FILE_FOLDER')
 
     # -----------------------------------------------------------------
     # QuadWild sub-panel (UNCHANGED)

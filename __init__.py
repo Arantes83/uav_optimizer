@@ -1,14 +1,15 @@
 bl_info = {
     "name": "UAV Topology Optimizer",
     "author": "Rodrigo Arantes",
-    "version": (1, 5, 0),
+    "version": (1, 6, 0),
     "blender": (4, 2, 0),
     "location": "View3D > UI > UAV Opt",
     "description": (
         "Photogrammetry / LiDAR post-processing pipeline. "
         "Pre-processing, QEM decimation, quad retopology (QuadriFlow, QuadWild, "
         "Voxel, Grid Projection), grid seam generation, native Blender UV unwrap, "
-        "advanced UV island packing, Albedo / AO / Normal map baking, and LOD generation."
+        "advanced UV island packing, Albedo / AO / Normal map baking, LOD generation, "
+        "and engine-ready FBX export."
     ),
     "category": "3D View",
 }
@@ -42,7 +43,7 @@ if "bpy" in locals():
     import importlib
     from . import (
         properties, qem_core, uv_utils, op_preprocess, op_qem, op_quadriflow, op_quadwild,
-        op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, ui,
+        op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, op_export, ui,
     )
     importlib.reload(properties)
     importlib.reload(qem_core)
@@ -58,6 +59,7 @@ if "bpy" in locals():
     importlib.reload(op_packing)
     importlib.reload(op_bake)
     importlib.reload(op_lod)
+    importlib.reload(op_export)
     importlib.reload(ui)
 
 from . import uv_utils
@@ -66,6 +68,7 @@ from .properties import (
     UAVOptimizerProperties, UAVQuadWildProperties,
     UAVUVStandardMethodsProperties,
     UAVUVPackProperties, UAVBakeProperties, UAVLODProperties,
+    UAVExportProperties,
 )
 from .op_uv  import (
     UAV_OT_uv_unwrap,
@@ -74,6 +77,7 @@ from .op_uv  import (
 from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset
 from .op_bake import UAV_OT_detail_baking
 from .op_lod  import UAV_OT_generate_lods, UAV_OT_lod_preview
+from .op_export import UAV_OT_export_engine_asset
 from .ui import UAV_PT_main_panel
 from .op_preprocess import UAV_OT_preprocess
 from .op_qem        import UAV_OT_qem_simplify
@@ -91,6 +95,7 @@ classes = (
     UAVUVPackProperties,
     UAVBakeProperties,
     UAVLODProperties,
+    UAVExportProperties,
 
     # UI
     UAV_PT_main_panel,
@@ -117,6 +122,7 @@ classes = (
     UAV_OT_detail_baking,
     UAV_OT_generate_lods,
     UAV_OT_lod_preview,
+    UAV_OT_export_engine_asset,
 )
 
 
@@ -126,6 +132,7 @@ SCENE_PROPS = (
     ("uav_uvpack_props", UAVUVPackProperties),
     ("uav_bake_props", UAVBakeProperties),
     ("uav_lod_props", UAVLODProperties),
+    ("uav_export_props", UAVExportProperties),
     ("uav_std_uv_props", UAVUVStandardMethodsProperties),
 )
 
