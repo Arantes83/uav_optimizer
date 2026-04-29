@@ -4,6 +4,7 @@ op_lod.py - LOD generation.
 
 import bpy
 import bmesh
+import re
 from bpy.types import Operator
 
 
@@ -83,6 +84,34 @@ def _duplicate_mesh_object(obj, new_name, target_collection):
     return new_obj
 
 
+_LOD_SUFFIX_RE = re.compile(r'(_LOD\d+|_PREP|_FASTDECIMATE|_TRUEQEM|_EDGELENGTH|_QEM_Simplified)$')
+
+
+def _resolve_base_name(obj):
+    """Resolve the canonical model name from derived pipeline objects."""
+    visited = set()
+    current = obj
+
+    while current is not None and current.name not in visited:
+        visited.add(current.name)
+        source_name = current.get("uav_source_object") if hasattr(current, "get") else None
+        if isinstance(source_name, str) and source_name:
+            source_obj = bpy.data.objects.get(source_name)
+            if source_obj is not None:
+                current = source_obj
+                continue
+        break
+
+    name = current.name if current is not None else obj.name
+    while True:
+        stripped = _LOD_SUFFIX_RE.sub('', name)
+        if stripped == name:
+            break
+        name = stripped
+
+    return name
+
+
 class UAV_OT_generate_lods(Operator):
     """Generate LODs from the active mesh while keeping the source untouched."""
 
@@ -119,11 +148,11 @@ class UAV_OT_generate_lods(Operator):
 
         self._base_obj = obj
         self._base_tris = base_tris
-        self._base_name = obj.name.split('_LOD')[0]
+        self._base_name = _resolve_base_name(obj)
         self._step_idx = 0
         self._created = []
 
-        col_name = props.lod_collection_name.strip() or f'{self._base_name}_LODs'
+        col_name = props.lod_collection_name.strip() or f'{self._base_name}_LOD'
         if col_name not in bpy.data.collections:
             self._lod_col = bpy.data.collections.new(col_name)
             context.scene.collection.children.link(self._lod_col)
