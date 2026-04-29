@@ -5,6 +5,29 @@ from bpy.props import (
     PointerProperty,
 )
 from bpy.types import PropertyGroup
+from .uvpm_bridge import get_engine_status
+
+
+def _uv_pack_engine_items(_self, context):
+    items = [
+        ('BLENDER_NATIVE', "Blender Native",
+         "Blender's built-in Pack Islands operator - reliable baseline"),
+        ('PYTHON', "Python Solver",
+         "Embedded Skyline / MaxRects in pure Python - no compilation needed"),
+        ('CPP_NATIVE', "C++ Native (fast)",
+         "Same algorithm compiled to native C++ - 80-100x faster than Python. "
+         "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
+    ]
+
+    scene = getattr(context, "scene", None) if context else None
+    props = getattr(scene, "uav_uvpack_props", None) if scene else None
+    configured_path = getattr(props, "uvpm_engine_path", "") if props else ""
+    if get_engine_status(configured_path).get("available"):
+        items.append(
+            ('UVPACKMASTER', "UVPackmaster 3",
+             "Use the external UVPackmaster installation detected on this machine"),
+        )
+    return items
 
 class UAVOptimizerProperties(PropertyGroup):
 
@@ -707,16 +730,17 @@ class UAVUVPackProperties(PropertyGroup):
     pack_engine: EnumProperty(
         name="Engine",
         description="Which packing backend to use",
-        items=[
-            ('BLENDER_NATIVE', "Blender Native",
-             "Blender's built-in Pack Islands operator - reliable baseline"),
-            ('PYTHON',         "Python Solver",
-             "Embedded Skyline / MaxRects in pure Python - no compilation needed"),
-            ('CPP_NATIVE',     "C++ Native (fast)",
-             "Same algorithm compiled to native C++ - 80-100x faster than Python. "
-             "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
-        ],
+        items=_uv_pack_engine_items,
         default='PYTHON',
+    )
+    uvpm_engine_path: StringProperty(
+        name="UVPackmaster Path",
+        description=(
+            "Optional UVPackmaster install root or direct engine3 path. "
+            "If empty, the addon auto-detects the installation from registry or the default Program Files path"
+        ),
+        default="",
+        subtype='DIR_PATH',
     )
     native_shape_method: EnumProperty(
         name="Shape Method",
@@ -1080,7 +1104,7 @@ class UAVLODProperties(PropertyGroup):
     )
     lod_collection_name: StringProperty(
         name="Collection Name",
-        description="Collection used to store generated LOD objects. Leave empty to use '<object>_LODs'",
+        description="Collection used to store generated LOD objects. Leave empty to use '<object>_LOD'",
         default="",
     )
 

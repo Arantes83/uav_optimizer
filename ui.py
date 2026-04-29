@@ -1,5 +1,6 @@
 import bpy
 from bpy.types import Panel
+from .uvpm_bridge import get_engine_status
 
 
 def _pack_best_occ_key(obj):
@@ -421,12 +422,46 @@ class UAV_PT_main_panel(Panel):
         col.use_property_split    = True
         col.use_property_decorate = False
         best_ever = _get_pack_best_occupancy(obj)
+        uvpm_status = get_engine_status(getattr(uvp, "uvpm_engine_path", ""))
+
+        uvpm_box = box.box()
+        uvpm_box.label(text="UVPackmaster Detection", icon='FILE_CACHE')
+        uvpm_col = uvpm_box.column(align=True)
+        uvpm_col.use_property_split = True
+        uvpm_col.use_property_decorate = False
+        uvpm_col.prop(uvp, "uvpm_engine_path", text="Engine Path")
+        detect_row = uvpm_col.row(align=True)
+        detect_row.operator("uav.uvpm_detect_engine", icon='VIEWZOOM', text="Auto Detect")
+        if uvpm_status.get("available"):
+            uvpm_col.label(text=f"Detected: {uvpm_status.get('display_path', '')}", icon='CHECKMARK')
+        else:
+            uvpm_col.label(text=uvpm_status.get("error", "UVPackmaster not available."), icon='ERROR')
 
         col.prop(uvp, "pack_engine", text="Engine")
 
         if uvp.pack_engine == 'BLENDER_NATIVE':
             col.prop(uvp, "native_shape_method",   text="Shape")
             col.prop(uvp, "native_merge_overlap",  text="Merge Overlap")
+        elif uvp.pack_engine == 'UVPACKMASTER':
+            col.prop(uvp, "precision",       text="Precision")
+            col.prop(uvp, "margin",          text="Margin (UV)")
+            col.prop(uvp, "rotation_enable", text="Allow Rotation")
+            if uvp.rotation_enable:
+                col.prop(uvp, "rotation_step", text="Rotation Step")
+
+            col.prop(uvp, "scale_mode", text="Scale Mode")
+            if uvp.scale_mode == 'CUSTOM':
+                warn = box.box()
+                warn.label(text="Custom scale is applied after UVPackmaster packing.", icon='INFO')
+                col.prop(uvp, "custom_scale", text="Custom Scale")
+
+            col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
+            if uvp.pixel_margin_enable:
+                col.prop(uvp, "pixel_margin", text="Margin (px)")
+                col.prop(uvp, "texture_size", text="Texture Size")
+
+            col.prop(uvp, "search_time",        text="Heuristic Time (s)")
+            col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
         else:
             col.prop(uvp, "packing_method",      text="Algorithm")
             if uvp.packing_method == 'MAXRECTS':
@@ -435,27 +470,26 @@ class UAV_PT_main_panel(Panel):
                 col.prop(uvp, "pixel_resolution", text="Pixel Resolution")
 
             col.prop(uvp, "optimizer",       text="Optimizer")
-        col.prop(uvp, "precision",       text="Precision")
-        col.prop(uvp, "margin",          text="Margin (UV)")
-        col.prop(uvp, "rotation_enable", text="Allow Rotation")
-        if uvp.rotation_enable:
-            col.prop(uvp, "rotation_step", text="Rotation Step")
+            col.prop(uvp, "precision",       text="Precision")
+            col.prop(uvp, "margin",          text="Margin (UV)")
+            col.prop(uvp, "rotation_enable", text="Allow Rotation")
+            if uvp.rotation_enable:
+                col.prop(uvp, "rotation_step", text="Rotation Step")
 
-        col.prop(uvp, "scale_mode", text="Scale Mode")
-        if uvp.scale_mode == 'CUSTOM':
-            col.prop(uvp, "custom_scale", text="Custom Scale")
-        if uvp.pack_engine != 'BLENDER_NATIVE':
+            col.prop(uvp, "scale_mode", text="Scale Mode")
+            if uvp.scale_mode == 'CUSTOM':
+                col.prop(uvp, "custom_scale", text="Custom Scale")
             col.prop(uvp, "density_weight", text="Density Weight")
 
-        col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
-        if uvp.pixel_margin_enable:
-            col.prop(uvp, "pixel_margin", text="Margin (px)")
-            col.prop(uvp, "texture_size", text="Texture Size")
+            col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
+            if uvp.pixel_margin_enable:
+                col.prop(uvp, "pixel_margin", text="Margin (px)")
+                col.prop(uvp, "texture_size", text="Texture Size")
 
-        col.prop(uvp, "search_time",        text="Search Time (s)")
-        col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
+            col.prop(uvp, "search_time",        text="Search Time (s)")
+            col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
 
-        if uvp.optimizer == 'SA':
+        if uvp.pack_engine not in {'BLENDER_NATIVE', 'UVPACKMASTER'} and uvp.optimizer == 'SA':
             sa_box = box.box()
             sa_box.label(text="Simulated Annealing", icon='MOD_PHYSICS')
             sa_col = sa_box.column(align=True)

@@ -38,6 +38,13 @@ from .uv_utils import (
     _scale_island_from_center,
     _translate,
 )
+from .uvpm_bridge import (
+    UVPackmasterError,
+    apply_uvpackmaster_result,
+    auto_detect_engine_path,
+    get_engine_status,
+    run_uvpackmaster,
+)
 
 
 _MASK_META = {}
@@ -932,6 +939,97 @@ def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
             )
 
 
+def run_uvpackmaster_pack(obj, bm, uv_layer, props, report_fn=None):
+    """Pack UV islands through the embedded UVPackmaster runtime."""
+    t0 = time.time()
+    islands = _get_uv_islands(bm, uv_layer)
+    if not islands:
+        if report_fn:
+            report_fn({'WARNING'}, "No UV islands found.")
+        return
+
+    cur_uvs = _save(bm, uv_layer)
+    cur_occ = min(sum(_area(f, uv_layer) for f in islands), 1.0)
+    cur_oob = _layout_is_out_of_bounds(islands, uv_layer)
+    prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+    custom_scale = float(getattr(props, "custom_scale", 1.0)) if props.scale_mode == 'CUSTOM' else 1.0
+
+    if report_fn:
+        status_msg = (
+            "Current layout is outside the 0-1 UV tile. Any valid result will be applied."
+            if cur_oob else
+            f"Best: {prev_best*100:.1f}%."
+        )
+        report_fn(
+            {'INFO'},
+            f"UVPackmaster: {len(islands)} island(s). Current: {cur_occ*100:.1f}%. {status_msg}"
+        )
+
+    try:
+        run_result = run_uvpackmaster(bm, uv_layer, props)
+        if not run_result.has_solution:
+            _restore(bm, uv_layer, cur_uvs)
+            props.best_ever_occupancy = prev_best
+            props.last_iterations = props.precision
+            props.last_time = time.time() - t0
+            props.last_method = "UVPackmaster 3.4.4 (no solution)"
+            details = run_result.error_messages or run_result.warning_messages
+            if report_fn:
+                report_fn({'ERROR'}, details[0] if details else "UVPackmaster returned no valid placement.")
+            return
+
+        apply_uvpackmaster_result(bm, uv_layer, run_result, custom_scale=custom_scale)
+    except UVPackmasterError as exc:
+        _restore(bm, uv_layer, cur_uvs)
+        props.best_ever_occupancy = prev_best
+        props.last_iterations = props.precision
+        props.last_time = time.time() - t0
+        props.last_method = "UVPackmaster 3.4.4 (failed)"
+        if report_fn:
+            report_fn({'ERROR'}, str(exc))
+        return
+
+    final_occ = min(sum(_area(f, uv_layer) for f in islands), 1.0)
+    final_oob = _layout_is_out_of_bounds(islands, uv_layer)
+    elapsed = time.time() - t0
+
+    if (not cur_oob) and final_occ <= cur_occ + 1e-6:
+        _restore(bm, uv_layer, cur_uvs)
+        props.best_ever_occupancy = prev_best
+        props.last_occupancy = cur_occ * 100.0
+        props.last_iterations = props.precision
+        props.last_time = elapsed
+        props.last_method = "UVPackmaster 3.4.4 (no improvement)"
+        if report_fn:
+            report_fn({'WARNING'}, f"No improvement (current: {cur_occ*100:.1f}%). ({elapsed:.2f}s)")
+        return
+
+    props.best_ever_occupancy = _set_pack_best_occupancy(
+        obj, uv_layer, max(prev_best, final_occ)
+    )
+    props.last_occupancy = final_occ * 100.0
+    props.last_iterations = props.precision
+    props.last_time = elapsed
+    props.last_method = "UVPackmaster 3.4.4"
+
+    if report_fn:
+        if cur_oob:
+            suffix = (
+                " Result still extends outside 0-1."
+                if final_oob else
+                " Layout is back inside the 0-1 UV tile."
+            )
+            report_fn(
+                {'INFO'},
+                f"UVPackmaster packed from out-of-bounds layout: {final_occ*100:.1f}% | {elapsed:.2f}s.{suffix}"
+            )
+        else:
+            report_fn(
+                {'INFO'},
+                f"UVPackmaster: {final_occ*100:.1f}% (was {cur_occ*100:.1f}%) | {elapsed:.2f}s"
+            )
+
+
 class UAV_OT_uv_pack(Operator):
     """Pack UV islands using the embedded Skyline/MaxRects engine"""
     bl_idname  = "uav.uv_pack"
@@ -970,6 +1068,8 @@ class UAV_OT_uv_pack(Operator):
             run_blender_native_pack(obj, bm, uv_layer, uvp, self.report)
         elif uvp.pack_engine == 'CPP_NATIVE':
             run_cpp_pack(obj, bm, uv_layer, uvp, self.report)
+        elif uvp.pack_engine == 'UVPACKMASTER':
+            run_uvpackmaster_pack(obj, bm, uv_layer, uvp, self.report)
         else:
             run_packing_engine(obj, bm, uv_layer, uvp, self.report)
         bmesh.update_edit_mesh(obj.data)
@@ -977,6 +1077,27 @@ class UAV_OT_uv_pack(Operator):
         if not was_edit:
             bpy.ops.object.mode_set(mode='OBJECT')
         return {'FINISHED'}
+
+
+class UAV_OT_uvpm_detect_engine(Operator):
+    """Auto-detect UVPackmaster installation and store the engine path"""
+    bl_idname = "uav.uvpm_detect_engine"
+    bl_label = "Detect UVPackmaster"
+    bl_description = "Search the machine for a UVPackmaster installation and store the detected engine path"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        uvp = context.scene.uav_uvpack_props
+        detected = auto_detect_engine_path()
+        if detected:
+            uvp.uvpm_engine_path = detected["engine_root"]
+            self.report({'INFO'}, f"UVPackmaster detected at {detected['engine_root']}")
+            return {'FINISHED'}
+
+        uvp.uvpm_engine_path = ""
+        status = get_engine_status("")
+        self.report({'WARNING'}, status.get("error", "UVPackmaster was not detected on this machine."))
+        return {'CANCELLED'}
 
 
 class UAV_OT_uv_pack_reset(Operator):

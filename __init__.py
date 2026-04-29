@@ -42,13 +42,14 @@ for _d in (_dll_dir, _uvpack_dll_dir):
 if "bpy" in locals():
     import importlib
     from . import (
-        properties, qem_core, uv_utils, mesh_health, op_preprocess, op_qem, op_quadriflow, op_quadwild,
+        properties, qem_core, uv_utils, mesh_health, uvpm_bridge, op_preprocess, op_qem, op_quadriflow, op_quadwild,
         op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, op_export, ui,
     )
     importlib.reload(properties)
     importlib.reload(qem_core)
     importlib.reload(uv_utils)
     importlib.reload(mesh_health)
+    importlib.reload(uvpm_bridge)
     importlib.reload(op_preprocess)
     importlib.reload(op_qem)
     importlib.reload(op_quadriflow)
@@ -75,7 +76,7 @@ from .op_uv  import (
     UAV_OT_uv_unwrap,
     UAV_OT_uv_equalize_texel, UAV_OT_uv_island_stats,
 )
-from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset
+from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset, UAV_OT_uvpm_detect_engine
 from .op_bake import UAV_OT_detail_baking
 from .op_lod  import UAV_OT_generate_lods, UAV_OT_lod_preview
 from .op_export import UAV_OT_export_engine_asset
@@ -118,6 +119,7 @@ classes = (
     UAV_OT_uv_island_stats,
     UAV_OT_uv_pack,
     UAV_OT_uv_pack_reset,
+    UAV_OT_uvpm_detect_engine,
 
     # Baking
     UAV_OT_detail_baking,
