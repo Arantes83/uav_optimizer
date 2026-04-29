@@ -13,12 +13,59 @@ from bpy.types import Operator
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr", ".hdr"}
+_PIPELINE_SUFFIX_RE = re.compile(r"(_LOD\d+|_PREP|_FASTDECIMATE|_TRUEQEM|_EDGELENGTH|_QEM_Simplified)$")
 
 
 def _safe_name(value, fallback="asset"):
     name = _SAFE_NAME_RE.sub("_", (value or "").strip())
     name = name.strip("._")
     return name or fallback
+
+
+def _canonical_pipeline_name(value):
+    name = (value or "").strip()
+    if not name:
+        return ""
+
+    while True:
+        stripped = _PIPELINE_SUFFIX_RE.sub("", name)
+        if stripped == name:
+            break
+        name = stripped
+    return name
+
+
+def _resolve_source_name(obj):
+    visited = set()
+    current = obj
+
+    while current is not None and current.name not in visited:
+        visited.add(current.name)
+        source_name = current.get("uav_source_object") if hasattr(current, "get") else None
+        if isinstance(source_name, str) and source_name:
+            source_obj = bpy.data.objects.get(source_name)
+            if source_obj is not None:
+                current = source_obj
+                continue
+        break
+
+    return _canonical_pipeline_name(current.name if current is not None else getattr(obj, "name", ""))
+
+
+def _collection_candidates(name):
+    base = (name or "").strip()
+    if not base:
+        return []
+    canonical = _canonical_pipeline_name(base)
+    candidates = [base]
+    if canonical and canonical not in candidates:
+        candidates.append(canonical)
+    if canonical:
+        for suffix in ("_LOD", "_LODs"):
+            candidate = f"{canonical}{suffix}"
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
 
 
 def _resolve_output_dir(props):
@@ -30,19 +77,25 @@ def _resolve_output_dir(props):
 
 
 def _find_lod_collection(context, props):
-    if props.collection_name.strip():
-        return bpy.data.collections.get(props.collection_name.strip())
-
-    lod_props = getattr(context.scene, "uav_lod_props", None)
-    if lod_props and lod_props.lod_collection_name.strip():
-        collection = bpy.data.collections.get(lod_props.lod_collection_name.strip())
+    for candidate in _collection_candidates(props.collection_name):
+        collection = bpy.data.collections.get(candidate)
         if collection is not None:
             return collection
 
+    lod_props = getattr(context.scene, "uav_lod_props", None)
+    if lod_props:
+        for candidate in _collection_candidates(lod_props.lod_collection_name):
+            collection = bpy.data.collections.get(candidate)
+            if collection is not None:
+                return collection
+
     active = context.active_object
     if active is not None:
-        base_name = active.name.split("_LOD")[0]
-        return bpy.data.collections.get(f"{base_name}_LODs")
+        base_name = _resolve_source_name(active)
+        for candidate in _collection_candidates(base_name):
+            collection = bpy.data.collections.get(candidate)
+            if collection is not None:
+                return collection
     return None
 
 
@@ -51,7 +104,14 @@ def _objects_from_collection(collection):
     for obj in collection.all_objects:
         if obj.type in {"MESH", "ARMATURE", "EMPTY"}:
             objects.append(obj)
-    return sorted(objects, key=lambda item: item.name)
+    return sorted(objects, key=_export_sort_key)
+
+
+def _export_sort_key(obj):
+    match = re.match(r"^(.+)_LOD(\d+)$", obj.name)
+    if match:
+        return (0, int(match.group(2)), obj.name)
+    return (1, obj.name)
 
 
 def _collect_export_objects(context, props):
@@ -79,7 +139,7 @@ def _default_asset_name(context, props, objects):
         if collection is not None:
             return _safe_name(collection.name)
     if objects:
-        return _safe_name(objects[0].name.split("_LOD")[0])
+        return _safe_name(_resolve_source_name(objects[0]) or objects[0].name)
     return "uav_asset"
 
 
@@ -116,6 +176,45 @@ def _collect_material_images(objects):
                     seen.add(pointer)
                     images.append(image)
     return images
+
+
+def _capture_material_state(objects):
+    state = {}
+    for obj in objects:
+        if obj.type != "MESH" or obj.data is None:
+            continue
+        state[obj.name] = list(obj.data.materials)
+    return state
+
+
+def _restore_material_state(state):
+    for name, materials in state.items():
+        obj = bpy.data.objects.get(name)
+        if obj is None or obj.type != "MESH" or obj.data is None:
+            continue
+        obj.data.materials.clear()
+        for material in materials:
+            obj.data.materials.append(material)
+
+
+def _propagate_lod_materials(objects):
+    mesh_objects = [obj for obj in objects if obj.type == "MESH" and obj.data is not None]
+    if len(mesh_objects) < 2:
+        return None
+
+    source_obj = next((obj for obj in mesh_objects if obj.name.endswith("_LOD0")), mesh_objects[0])
+    template_materials = list(source_obj.data.materials)
+    if not template_materials:
+        return None
+
+    state = _capture_material_state(mesh_objects)
+    for obj in mesh_objects:
+        if obj is source_obj:
+            continue
+        obj.data.materials.clear()
+        for material in template_materials:
+            obj.data.materials.append(material)
+    return state
 
 
 def _image_filename(image):
@@ -304,6 +403,7 @@ class UAV_OT_export_engine_asset(Operator):
         output_dir = _resolve_output_dir(props)
         asset_name = _default_asset_name(context, props, objects)
         filepath = os.path.join(output_dir, asset_name + ".fbx")
+        material_state = None
 
         errors = self._validate(props, objects, output_dir)
         if errors:
@@ -320,6 +420,9 @@ class UAV_OT_export_engine_asset(Operator):
             for obj in objects:
                 obj.select_set(True)
             context.view_layer.objects.active = next((obj for obj in objects if obj.type == "MESH"), objects[0])
+
+            if props.scope == "LOD_COLLECTION":
+                material_state = _propagate_lod_materials(objects)
 
             texture_dir = ""
             copied_textures = []
@@ -349,4 +452,6 @@ class UAV_OT_export_engine_asset(Operator):
             traceback.print_exc()
             return {"CANCELLED"}
         finally:
+            if material_state is not None:
+                _restore_material_state(material_state)
             _restore_context(context, state)
