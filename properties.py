@@ -96,6 +96,82 @@ class UAVOptimizerProperties(PropertyGroup):
         description="How aggressively a spike vertex is pulled towards its neighbours' average (0.0 = no move, 1.0 = snap to average)",
         default=0.8, min=0.0, max=1.0, precision=2
     )
+    pre_topology_enable: BoolProperty(
+        name="Topology Check",
+        description="Analyze mesh topology during pre-processing and store a readiness report on the generated _PREP object",
+        default=True,
+    )
+    pre_repair_mode: EnumProperty(
+        name="Repair Mode",
+        description="Topology repair policy applied inside pre-processing before simplification and retopology",
+        items=[
+            ('DIAGNOSE', "Diagnose Only", "Analyze topology but do not repair it"),
+            ('SAFE', "Safe Repair", "Remove loose/degenerate geometry and recalculate normals"),
+            ('SURFACE_REPAIR', "Surface Repair", "Safe repair plus optional small hole filling"),
+            ('VOXEL_PREP', "Voxel Prep", "Prepare open surfaces more aggressively for voxel remeshing"),
+            ('AGGRESSIVE', "Aggressive", "Attempt stronger cleanup; may alter photogrammetry surfaces"),
+        ],
+        default='SAFE',
+    )
+    pre_delete_loose_geometry: BoolProperty(
+        name="Delete Loose Geometry",
+        description="Remove vertices and edges that are not part of any valid surface before retopology",
+        default=True,
+    )
+    pre_recalculate_normals: BoolProperty(
+        name="Recalculate Normals",
+        description="Recalculate face normals after cleanup to reduce shading, unwrap and baking errors",
+        default=True,
+    )
+    pre_remove_small_components: BoolProperty(
+        name="Remove Small Components",
+        description="Remove tiny disconnected mesh fragments after cleanup. Disabled by default because photogrammetry details may be real geometry",
+        default=False,
+    )
+    pre_min_component_faces: IntProperty(
+        name="Min Component Faces",
+        description="Connected components with fewer faces than this value may be removed when Remove Small Components is enabled",
+        default=32,
+        min=1,
+        max=100000,
+    )
+    pre_fill_small_holes: BoolProperty(
+        name="Fill Small Holes",
+        description="Fill only small boundary loops. Keep disabled for open terrain unless the asset is expected to be a closed object",
+        default=False,
+    )
+    pre_fill_hole_max_edges: IntProperty(
+        name="Max Hole Edges",
+        description="Maximum number of sides in holes eligible for automatic filling. Do not set to zero for terrain unless you want Blender to fill all holes",
+        default=8,
+        min=0,
+        max=1000,
+    )
+    pre_warn_if_not_watertight: BoolProperty(
+        name="Warn If Not Watertight",
+        description="Store a warning when the preprocessed mesh is open. This is useful for voxel remesh, but open terrain should not fail automatically",
+        default=True,
+    )
+    pre_store_health_report: BoolProperty(
+        name="Store Health Report",
+        description="Write topology analysis results as custom properties on the generated _PREP object",
+        default=True,
+    )
+    pre_last_report_title: StringProperty(
+        name="Last Preprocess Report Title",
+        description="UI title for the last preprocess or diagnose report",
+        default="",
+    )
+    pre_last_report_status: StringProperty(
+        name="Last Preprocess Report Status",
+        description="Aggregated status from the last preprocess or diagnose run",
+        default="",
+    )
+    pre_last_report_body: StringProperty(
+        name="Last Preprocess Report Body",
+        description="Detailed preprocess or diagnose report shown below the run button",
+        default="",
+    )
 
     # ==========================================
     # 2. QEM Simplification

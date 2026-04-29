@@ -33,6 +33,16 @@ def _enabled_pbr_maps(bake):
     return enabled
 
 
+def _preprocess_report_icon(status):
+    return {
+        "READY": 'CHECKMARK',
+        "WARNING": 'ERROR',
+        "RISKY": 'ERROR',
+        "FAILED": 'CANCEL',
+        "UNKNOWN": 'INFO',
+    }.get(status, 'INFO')
+
+
 class UAV_PT_main_panel(Panel):
     bl_label       = "UAV Post-Processing Pipeline"
     bl_idname      = "UAV_PT_main_panel"
@@ -95,7 +105,35 @@ class UAV_PT_main_panel(Panel):
             row = col.row(align=True)
             row.prop(props, "pre_despike_passes", text="Passes")
             row.prop(props, "pre_despike_lerp",   text="Strength")
+            box.separator(factor=0.4)
+            topo = box.box()
+            topo.label(text="Topology Safety", icon='MESH_DATA')
+            topo_col = topo.column(align=True)
+            topo_col.use_property_split    = True
+            topo_col.use_property_decorate = False
+            topo_col.prop(props, "pre_topology_enable", text="Topology Check")
+            if props.pre_topology_enable:
+                topo_col.prop(props, "pre_repair_mode", text="Repair Mode")
+                topo_col.prop(props, "pre_delete_loose_geometry", text="Delete Loose Geometry")
+                topo_col.prop(props, "pre_recalculate_normals", text="Recalculate Normals")
+                topo_col.prop(props, "pre_remove_small_components", text="Remove Small Components")
+                if props.pre_remove_small_components:
+                    topo_col.prop(props, "pre_min_component_faces", text="Min Component Faces")
+                topo_col.prop(props, "pre_fill_small_holes", text="Fill Small Holes")
+                if props.pre_fill_small_holes:
+                    topo_col.prop(props, "pre_fill_hole_max_edges", text="Max Hole Edges")
+                topo_col.prop(props, "pre_warn_if_not_watertight", text="Warn If Not Watertight")
+                topo_col.prop(props, "pre_store_health_report", text="Store Health Report")
             box.operator("uav.preprocess", icon='PLAY', text="Run Pre-Processing")
+            if props.pre_last_report_body.strip():
+                report_box = box.box()
+                report_box.label(
+                    text=props.pre_last_report_title or "Last Pre-Processing Report",
+                    icon=_preprocess_report_icon(props.pre_last_report_status),
+                )
+                report_col = report_box.column(align=True)
+                for line in props.pre_last_report_body.splitlines():
+                    report_col.label(text=line or " ")
 
         # -- 2. QEM --------------------------------------------------
         box = layout.box()

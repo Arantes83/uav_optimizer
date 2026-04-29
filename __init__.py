@@ -42,12 +42,13 @@ for _d in (_dll_dir, _uvpack_dll_dir):
 if "bpy" in locals():
     import importlib
     from . import (
-        properties, qem_core, uv_utils, op_preprocess, op_qem, op_quadriflow, op_quadwild,
+        properties, qem_core, uv_utils, mesh_health, op_preprocess, op_qem, op_quadriflow, op_quadwild,
         op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, op_export, ui,
     )
     importlib.reload(properties)
     importlib.reload(qem_core)
     importlib.reload(uv_utils)
+    importlib.reload(mesh_health)
     importlib.reload(op_preprocess)
     importlib.reload(op_qem)
     importlib.reload(op_quadriflow)
