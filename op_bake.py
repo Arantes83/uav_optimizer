@@ -286,7 +286,7 @@ def _ensure_slots(obj):
         bpy.ops.object.material_slot_add()
     for slot in obj.material_slots:
         if slot.material is None:
-            mat = bpy.data.materials.new(obj.name + "_UAVEmpty")
+            mat = bpy.data.materials.new(obj.name + BAKE_MAT_SUFFIX)
             mat.use_nodes = True
             slot.material = mat
 
@@ -338,12 +338,17 @@ def _ensure_bake_material_assigned(lowpoly):
     original_materials = {slot.material for slot in lowpoly.material_slots if slot.material is not None}
     mat_name = lowpoly.name + BAKE_MAT_SUFFIX
     bake_material = bpy.data.materials.get(mat_name)
-    if bake_material is None or bake_material in original_materials:
-        if source_material is not None:
-            bake_material = source_material.copy()
-            bake_material.name = mat_name
-        else:
-            bake_material = bpy.data.materials.new(mat_name)
+    if bake_material is not None and bake_material not in original_materials:
+        try:
+            bpy.data.materials.remove(bake_material)
+        except Exception:
+            pass
+        bake_material = None
+    if source_material is not None:
+        bake_material = source_material.copy()
+        bake_material.name = mat_name
+    else:
+        bake_material = bpy.data.materials.new(mat_name)
     bake_material.use_nodes = True
 
     for slot in lowpoly.material_slots:
@@ -378,13 +383,19 @@ def _restore_materials(slots, originals, copies):
                 pass
 
 
-def _insert_bake_target_node(mat, image):
+def _insert_bake_target_node(mat, image, mesh_name):
     nodes = mat.node_tree.nodes
-    node = nodes.get(TMP_NODE_NAME)
-    if node is None:
-        node = nodes.new("ShaderNodeTexImage")
-        node.name = TMP_NODE_NAME
-        node.location = (-400, 300)
+    for node_name in (TMP_NODE_NAME, f"{mesh_name}_BakeTarget"):
+        node = nodes.get(node_name)
+        if node is not None:
+            try:
+                nodes.remove(node)
+            except Exception:
+                pass
+    node = nodes.new("ShaderNodeTexImage")
+    node.name = f"{mesh_name}_BakeTarget"
+    node.label = f"{mesh_name} Bake Target"
+    node.location = (-400, 300)
     node.image = image
     for other in nodes:
         other.select = False
@@ -396,7 +407,7 @@ def _prepare_lowpoly_mats(lowpoly, image):
     _ensure_slots(lowpoly)
     for slot in lowpoly.material_slots:
         if slot.material is None:
-            mat = bpy.data.materials.new(lowpoly.name + "_UAVEmpty")
+            mat = bpy.data.materials.new(lowpoly.name + BAKE_MAT_SUFFIX)
             mat.use_nodes = True
             slot.material = mat
         mat = slot.material
@@ -410,7 +421,8 @@ def _prepare_lowpoly_mats(lowpoly, image):
         if surface is not None and not surface.links:
             principled = mat.node_tree.nodes.new("ShaderNodeBsdfPrincipled")
             mat.node_tree.links.new(principled.outputs["BSDF"], surface)
-        _insert_bake_target_node(mat, image)
+        _clear_managed_nodes(mat.node_tree.nodes)
+        _insert_bake_target_node(mat, image, lowpoly.name)
 
 
 def _set_image_colorspace(image, colorspace):
@@ -431,15 +443,21 @@ def _set_image_colorspace(image, colorspace):
 def _create_bake_image(name, size, map_id):
     settings = MAP_SETTINGS[map_id]
     existing = bpy.data.images.get(name)
-    if existing:
-        bpy.data.images.remove(existing)
-    image = bpy.data.images.new(
-        name,
-        width=size,
-        height=size,
-        alpha=False,
-        float_buffer=settings["float_buffer"],
-    )
+    if existing is not None:
+        image = existing
+        try:
+            if image.size[0] != size or image.size[1] != size:
+                image.scale(size, size)
+        except Exception:
+            pass
+    else:
+        image = bpy.data.images.new(
+            name,
+            width=size,
+            height=size,
+            alpha=False,
+            float_buffer=settings["float_buffer"],
+        )
     _set_image_colorspace(image, settings["colorspace"])
     return image
 
@@ -472,27 +490,25 @@ def _save_image(image, out_dir, name):
 
 def _load_saved_image(image, out_path, image_name, map_id):
     loaded_image = image
-    if image.users == 0:
-        try:
-            bpy.data.images.remove(image)
-            loaded_image = bpy.data.images.load(out_path, check_existing=True)
-            loaded_image.name = image_name
-        except Exception:
-            loaded_image = bpy.data.images.get(image_name)
-            if loaded_image is None:
-                loaded_image = bpy.data.images.load(out_path, check_existing=True)
-                loaded_image.name = image_name
     try:
         loaded_image.filepath_raw = out_path
     except Exception:
         pass
+    try:
+        loaded_image.reload()
+    except Exception:
+        try:
+            loaded_image = bpy.data.images.load(out_path, check_existing=True)
+        except Exception:
+            loaded_image = bpy.data.images.get(image_name) or image
+    if loaded_image.name != image_name:
+        try:
+            loaded_image.name = image_name
+        except Exception:
+            pass
     loaded_image.filepath = out_path
     try:
         loaded_image.source = "FILE"
-    except Exception:
-        pass
-    try:
-        loaded_image.reload()
     except Exception:
         pass
     _set_image_colorspace(loaded_image, MAP_SETTINGS[map_id]["colorspace"])
