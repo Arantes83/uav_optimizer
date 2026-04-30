@@ -2,7 +2,7 @@
 op_quadwild.py — QuadWild Retopology Operator
 ==============================================
 Integrates the QuadWild algorithm (lib_quadwild.dll + lib_quadpatches.dll)
-into the UAV Optimizer pipeline.
+into the MeshForge UAV pipeline.
 
 Pipeline identical to QRemeshify:
   BMesh → OBJ (disk) → remeshAndField → trace → quadrangulate → OBJ → Blender mesh
