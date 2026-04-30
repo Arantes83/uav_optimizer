@@ -77,6 +77,10 @@ def _resolve_output_dir(props):
 
 
 def _find_lod_collection(context, props):
+    collection_ref = getattr(props, "collection_ref", None)
+    if collection_ref is not None:
+        return collection_ref
+
     for candidate in _collection_candidates(props.collection_name):
         collection = bpy.data.collections.get(candidate)
         if collection is not None:

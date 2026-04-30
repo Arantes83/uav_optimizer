@@ -163,6 +163,10 @@ class UAV_OT_generate_lods(Operator):
         self._prev_obj = self._lod0_obj
         self._created.append(self._lod0_obj)
 
+        export_props = getattr(context.scene, "uav_export_props", None)
+        if export_props is not None and getattr(export_props, "collection_ref", None) is None:
+            export_props.collection_ref = self._lod_col
+
         self._wm = context.window_manager
         self._wm.progress_begin(0, len(self._lod_table))
         context.window.cursor_set('WAIT')
