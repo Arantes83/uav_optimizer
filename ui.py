@@ -1,6 +1,7 @@
 import bpy
 from bpy.types import Panel
-from .uvpm_bridge import get_engine_status
+from . import addon_images
+from . import uvpm_addon
 
 
 def _pack_best_occ_key(obj):
@@ -45,11 +46,11 @@ def _preprocess_report_icon(status):
 
 
 class UAV_PT_main_panel(Panel):
-    bl_label       = "UAV Post-Processing Pipeline"
+    bl_label       = "MeshForge UAV"
     bl_idname      = "UAV_PT_main_panel"
     bl_space_type  = 'VIEW_3D'
     bl_region_type = 'UI'
-    bl_category    = 'UAV Opt'
+    bl_category    = 'MeshForge UAV'
 
     def _draw_foldout_header(self, layout, props, attr, label, icon='NONE'):
         row = layout.row(align=True)
@@ -89,6 +90,16 @@ class UAV_PT_main_panel(Panel):
             box.label(text="Disable and re-enable the addon.")
             box.label(text="Missing: " + ", ".join(missing))
             return
+
+        banner_icon = addon_images.get_banner_icon_id()
+        if banner_icon:
+            banner = layout.box()
+            row = banner.row()
+            row.scale_y = 2.0
+            row.template_icon(icon_value=banner_icon, scale=3.0)
+        else:
+            banner = layout.box()
+            banner.label(text="MeshForge UAV", icon='INFO')
 
         # -- 1. Pre-Processing ----------------------------------------
         box = layout.box()
@@ -214,7 +225,7 @@ class UAV_PT_main_panel(Panel):
         # -- 6. UV Island Packing -------------------------------------
         box = layout.box()
         if self._draw_foldout_header(box, props, "ui_show_uv_pack", "6. Island Packing", icon='GROUP_UVS'):
-            self._draw_uv_pack(box, uvp, context.active_object)
+            self._draw_uv_pack(box, uvp, context.active_object, context)
 
         # -- 7. Baking ------------------------------------------------
         box = layout.box()
@@ -417,52 +428,94 @@ class UAV_PT_main_panel(Panel):
             if std_uv.last_oob > 0:
                 res_col.label(text=f"{std_uv.last_oob} faces out of bounds", icon='ERROR')
 
-    def _draw_uv_pack(self, box, uvp, obj):
+    def _draw_uvpm_addon_block(self, box, uvp, context):
+        version = uvpm_addon.UVPmAddonData.version()
+        uvpm_box = box.box()
+        status_col = uvpm_box.column(align=True)
+        status_col.use_property_split = True
+        status_col.use_property_decorate = False
+        status_col.label(text="UVPackmaster Addon", icon='MODIFIER')
+
+        if not version:
+            status_col.label(text="Not enabled as a Blender addon.", icon='ERROR')
+            return False
+
+        status_col.label(text=f"Detected: v{'.'.join(str(part) for part in version)}", icon='CHECKMARK')
+        status_col.operator("uav.uvpm_sync_props", icon='FILE_REFRESH', text="Sync to UVPackmaster")
+
+        if uvpm_addon.UVPmAddonPoll.since_3_4_0():
+            try:
+                prefs = uvpm_addon.UVPmAddonData.prefs()
+                if prefs:
+                    active_mode = prefs.get_active_main_mode(context)
+                    row = status_col.row(align=True)
+                    row.label(text="Packing Mode:")
+                    row.menu("UVPM3_MT_BrowseModes", text=type(active_mode).enum_name(), icon='COLLAPSEMENU')
+            except Exception as exc:
+                status_col.label(text=f"UVPM mode UI unavailable: {exc}", icon='ERROR')
+        elif uvpm_addon.UVPmAddonPoll.since_3():
+            status_col.prop(uvp, "uvp3_packing_method", text="UVPM Mode")
+
+        status_col.separator(factor=0.5)
+        status_col.prop(uvp, "margin", text="Margin (UV)")
+        status_col.prop(uvp, "rotation_enable", text="Allow Rotation")
+        if uvp.rotation_enable:
+            status_col.prop(uvp, "rotation_step", text="Rotation Step")
+
+        status_col.prop(uvp, "scale_mode", text="Scale Mode")
+        if uvp.scale_mode == 'CUSTOM':
+            status_col.prop(uvp, "custom_scale", text="Custom Scale")
+
+        status_col.prop(uvp, "lock_overlapping_enable", text="Lock Overlapping")
+        if uvp.lock_overlapping_enable:
+            status_col.prop(uvp, "lock_overlapping_mode", text="Lock Mode")
+
+        status_col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
+        if uvp.advanced_heuristic:
+            status_col.prop(uvp, "search_time", text="Search Time (s)")
+            if uvp.search_time <= 0.01:
+                status_col.label(text="UVPM direct pack uses a safe 10s heuristic timeout.", icon='TIME')
+
+        return True
+
+    def _draw_uv_pack(self, box, uvp, obj, context):
         col = box.column(align=True)
         col.use_property_split    = True
         col.use_property_decorate = False
         best_ever = _get_pack_best_occupancy(obj)
-        uvpm_status = get_engine_status(getattr(uvp, "uvpm_engine_path", ""))
-
-        uvpm_box = box.box()
-        uvpm_box.label(text="UVPackmaster Detection", icon='FILE_CACHE')
-        uvpm_col = uvpm_box.column(align=True)
-        uvpm_col.use_property_split = True
-        uvpm_col.use_property_decorate = False
-        uvpm_col.prop(uvp, "uvpm_engine_path", text="Engine Path")
-        detect_row = uvpm_col.row(align=True)
-        detect_row.operator("uav.uvpm_detect_engine", icon='VIEWZOOM', text="Auto Detect")
-        if uvpm_status.get("available"):
-            uvpm_col.label(text=f"Detected: {uvpm_status.get('display_path', '')}", icon='CHECKMARK')
-        else:
-            uvpm_col.label(text=uvpm_status.get("error", "UVPackmaster not available."), icon='ERROR')
 
         col.prop(uvp, "pack_engine", text="Engine")
 
-        if uvp.pack_engine == 'BLENDER_NATIVE':
-            col.prop(uvp, "native_shape_method",   text="Shape")
-            col.prop(uvp, "native_merge_overlap",  text="Merge Overlap")
-        elif uvp.pack_engine == 'UVPACKMASTER':
-            col.prop(uvp, "precision",       text="Precision")
-            col.prop(uvp, "margin",          text="Margin (UV)")
+        if uvp.pack_engine == 'AUTO':
+            info = box.box()
+            info.label(text="Auto prefers UVPackmaster Addon, then C++ Native, then Blender Native.", icon='INFO')
+
+        uvpm_controls_active = False
+        if uvp.pack_engine in {'AUTO', 'UVPACKMASTER_ADDON'}:
+            uvpm_controls_active = self._draw_uvpm_addon_block(box, uvp, context)
+
+        draw_general_controls = not uvpm_controls_active
+        if draw_general_controls:
+            col.prop(uvp, "margin", text="Margin (UV)")
             col.prop(uvp, "rotation_enable", text="Allow Rotation")
             if uvp.rotation_enable:
                 col.prop(uvp, "rotation_step", text="Rotation Step")
 
+        draw_cpp_controls = (
+            uvp.pack_engine == 'CPP_NATIVE' or
+            (uvp.pack_engine == 'AUTO' and not uvpm_controls_active)
+        )
+
+        if draw_cpp_controls:
             col.prop(uvp, "scale_mode", text="Scale Mode")
             if uvp.scale_mode == 'CUSTOM':
-                warn = box.box()
-                warn.label(text="Custom scale is applied after UVPackmaster packing.", icon='INFO')
                 col.prop(uvp, "custom_scale", text="Custom Scale")
-
-            col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
-            if uvp.pixel_margin_enable:
-                col.prop(uvp, "pixel_margin", text="Margin (px)")
-                col.prop(uvp, "texture_size", text="Texture Size")
-
-            col.prop(uvp, "search_time",        text="Heuristic Time (s)")
             col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
-        else:
+
+        if uvp.pack_engine == 'BLENDER_NATIVE':
+            col.prop(uvp, "native_shape_method",   text="Shape")
+            col.prop(uvp, "native_merge_overlap",  text="Merge Overlap")
+        elif draw_cpp_controls:
             col.prop(uvp, "packing_method",      text="Algorithm")
             if uvp.packing_method == 'MAXRECTS':
                 col.prop(uvp, "maxrects_heuristic", text="Heuristic")
@@ -471,14 +524,6 @@ class UAV_PT_main_panel(Panel):
 
             col.prop(uvp, "optimizer",       text="Optimizer")
             col.prop(uvp, "precision",       text="Precision")
-            col.prop(uvp, "margin",          text="Margin (UV)")
-            col.prop(uvp, "rotation_enable", text="Allow Rotation")
-            if uvp.rotation_enable:
-                col.prop(uvp, "rotation_step", text="Rotation Step")
-
-            col.prop(uvp, "scale_mode", text="Scale Mode")
-            if uvp.scale_mode == 'CUSTOM':
-                col.prop(uvp, "custom_scale", text="Custom Scale")
             col.prop(uvp, "density_weight", text="Density Weight")
 
             col.prop(uvp, "pixel_margin_enable", text="Use Pixel Margin")
@@ -487,9 +532,8 @@ class UAV_PT_main_panel(Panel):
                 col.prop(uvp, "texture_size", text="Texture Size")
 
             col.prop(uvp, "search_time",        text="Search Time (s)")
-            col.prop(uvp, "advanced_heuristic", text="Advanced Heuristic")
 
-        if uvp.pack_engine not in {'BLENDER_NATIVE', 'UVPACKMASTER'} and uvp.optimizer == 'SA':
+        if draw_cpp_controls and uvp.optimizer == 'SA':
             sa_box = box.box()
             sa_box.label(text="Simulated Annealing", icon='MOD_PHYSICS')
             sa_col = sa_box.column(align=True)
@@ -576,7 +620,7 @@ class UAV_PT_main_panel(Panel):
         col.prop(export, "target_engine", text="Target")
         col.prop(export, "scope", text="Scope")
         if export.scope == 'LOD_COLLECTION':
-            col.prop(export, "collection_name", text="LOD Collection")
+            col.prop(export, "collection_ref", text="LOD Collection")
         col.prop(export, "output_dir", text="Output Folder")
         col.prop(export, "asset_name", text="Asset Name")
 

@@ -1,11 +1,11 @@
 bl_info = {
-    "name": "UAV Topology Optimizer",
+    "name": "MeshForge UAV",
     "author": "Rodrigo Arantes",
-    "version": (1, 6, 0),
-    "blender": (4, 2, 0),
-    "location": "View3D > UI > UAV Opt",
+    "version": (1, 7, 0),
+    "blender": (4, 5, 0),
+    "location": "View3D > UI > MeshForge UAV",
     "description": (
-        "Photogrammetry / LiDAR post-processing pipeline. "
+        "MeshForge UAV photogrammetry / LiDAR post-processing pipeline. "
         "Pre-processing, QEM decimation, quad retopology (QuadriFlow, QuadWild, "
         "Voxel, Grid Projection), grid seam generation, native Blender UV unwrap, "
         "advanced UV island packing, Albedo / AO / Normal map baking, LOD generation, "
@@ -42,14 +42,16 @@ for _d in (_dll_dir, _uvpack_dll_dir):
 if "bpy" in locals():
     import importlib
     from . import (
-        properties, qem_core, uv_utils, mesh_health, uvpm_bridge, op_preprocess, op_qem, op_quadriflow, op_quadwild,
+        addon_images, properties, qem_core, uv_utils, mesh_health, uvpm_bridge, uvpm_addon, op_preprocess, op_qem, op_quadriflow, op_quadwild,
         op_shrinkwrap, op_voxel, op_seam, op_uv, op_packing, op_bake, op_lod, op_export, ui,
     )
+    importlib.reload(addon_images)
     importlib.reload(properties)
     importlib.reload(qem_core)
     importlib.reload(uv_utils)
     importlib.reload(mesh_health)
     importlib.reload(uvpm_bridge)
+    importlib.reload(uvpm_addon)
     importlib.reload(op_preprocess)
     importlib.reload(op_qem)
     importlib.reload(op_quadriflow)
@@ -65,6 +67,7 @@ if "bpy" in locals():
     importlib.reload(ui)
 
 from . import uv_utils
+from . import addon_images
 
 from .properties import (
     UAVOptimizerProperties, UAVQuadWildProperties,
@@ -76,7 +79,7 @@ from .op_uv  import (
     UAV_OT_uv_unwrap,
     UAV_OT_uv_equalize_texel, UAV_OT_uv_island_stats,
 )
-from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset, UAV_OT_uvpm_detect_engine
+from .op_packing import UAV_OT_uv_pack, UAV_OT_uv_pack_reset, UAV_OT_uvpm_sync_props
 from .op_bake import UAV_OT_detail_baking
 from .op_lod  import UAV_OT_generate_lods, UAV_OT_lod_preview
 from .op_export import UAV_OT_export_engine_asset
@@ -119,7 +122,7 @@ classes = (
     UAV_OT_uv_island_stats,
     UAV_OT_uv_pack,
     UAV_OT_uv_pack_reset,
-    UAV_OT_uvpm_detect_engine,
+    UAV_OT_uvpm_sync_props,
 
     # Baking
     UAV_OT_detail_baking,
@@ -141,6 +144,7 @@ SCENE_PROPS = (
 
 LEGACY_CLASS_NAMES = (
     "UAV_OT_split_chunks",
+    "UAV_OT_uvpm_detect_engine",
 )
 
 
@@ -193,6 +197,7 @@ def _safe_register_scene_prop(name, prop_type):
 def register():
     unregister()
 
+    addon_images.register()
     for cls in classes:
         _safe_register_class(cls)
 
@@ -209,6 +214,8 @@ def unregister():
 
     for cls in reversed(classes):
         _safe_unregister_class(cls)
+
+    addon_images.unregister()
 
 
 if __name__ == "__main__":

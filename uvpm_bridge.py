@@ -5,6 +5,7 @@ import queue
 import struct
 import subprocess
 import threading
+import time
 
 from mathutils import Matrix, Vector
 
@@ -17,6 +18,8 @@ except ImportError:  # pragma: no cover
 UVPM_ENGINE_VERSION = "3.4.4"
 UVPM_ENGINE_MARKER = f"release-{UVPM_ENGINE_VERSION}.uvpmi"
 UVPM_DEFAULT_INSTALL_ROOT = r"C:\Program Files\UVPackmaster"
+UVPM_DEFAULT_TIMEOUT_SECONDS = 180.0
+UVPM_TIMEOUT_GRACE_SECONDS = 60.0
 
 
 class UVPackmasterError(RuntimeError):
@@ -24,11 +27,13 @@ class UVPackmasterError(RuntimeError):
 
 
 class UvpmOpcode:
+    REPORT_VERSION = 0
     EXECUTE_SCENARIO = 1
 
 
 class UvpmMessageCode:
     PHASE = 0
+    VERSION = 1
     ISLANDS = 3
     OUT_ISLANDS = 4
     LOG = 5
@@ -55,6 +60,7 @@ class UvpmMapSerializationFlags:
 
 class UvpmFaceInputFlags:
     SELECTED = 1
+    UV_SET_IDX_OFFSET = 1 << 16
 
 
 class UvpmOutIslandsSerializationFlags:
@@ -76,14 +82,15 @@ class UvpmRunResult:
         self.logs = []
         self.warning_messages = []
         self.error_messages = []
+        self.engine_stderr = ""
 
     @property
     def has_solution(self):
-        return self.retcode in {
+        return bool(self.retcode in {
             UvpmRetCode.SUCCESS,
             UvpmRetCode.NO_SPACE,
             UvpmRetCode.WARNING,
-        } and self.island_faces and self.out_islands
+        } and self.island_faces and self.out_islands)
 
 
 def _addon_dir():
@@ -291,6 +298,29 @@ def _send_finish_confirmation(engine_proc):
     engine_proc.stdin.flush()
 
 
+def _terminate_process(proc):
+    if proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def _read_process_stderr(proc):
+    if proc.stderr is None:
+        return ""
+    try:
+        return proc.stderr.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+
+
 def _blender_threads():
     try:
         import bpy
@@ -298,6 +328,81 @@ def _blender_threads():
         return max(1, int(getattr(bpy.context.preferences.system, "threads", 0) or 0))
     except Exception:
         return max(1, os.cpu_count() or 1)
+
+
+def _read_engine_device_settings(engine_exec):
+    args = [
+        engine_exec,
+        "-E",
+        "-o", str(UvpmOpcode.REPORT_VERSION),
+    ]
+    env = os.environ.copy()
+    env["PATH"] = os.path.dirname(engine_exec) + os.pathsep + env.get("PATH", "")
+    creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+
+    proc = subprocess.Popen(
+        args,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=creation_flags,
+        env=env,
+    )
+    _send_finish_confirmation(proc)
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process(proc)
+        stderr = _read_process_stderr(proc)
+        detail = f" UVPackmaster stderr: {stderr}" if stderr else ""
+        raise UVPackmasterError(f"UVPackmaster device query timed out.{detail}") from exc
+
+    stderr = _read_process_stderr(proc)
+    while True:
+        try:
+            msg = _recv_message(proc.stdout)
+        except Exception as exc:
+            detail = f" UVPackmaster stderr: {stderr}" if stderr else ""
+            raise UVPackmasterError(f"Could not read UVPackmaster device information: {exc}.{detail}")
+
+        msg_code = _force_read_int(msg)
+        if msg_code != UvpmMessageCode.VERSION:
+            continue
+
+        _major = _force_read_int(msg)
+        _minor = _force_read_int(msg)
+        _patch = _force_read_int(msg)
+        _ = _force_read_bytes(msg, 1)
+
+        feature_count = _force_read_int(msg)
+        for _ in range(feature_count):
+            _force_read_int(msg)
+
+        device_count = _force_read_int(msg)
+        devices = []
+        for _ in range(device_count):
+            device_id = _decode_string(msg)
+            _device_name = _decode_string(msg)
+            device_flags = _force_read_int(msg)
+            devices.append({
+                "id": device_id,
+                "supported": bool(device_flags & 1),
+            })
+
+        if not devices:
+            raise UVPackmasterError("UVPackmaster reported no packing devices.")
+
+        # Keep the embedded integration deterministic. The official addon lets
+        # users opt into GPU devices; here CPU avoids driver-level UI stalls.
+        enabled_devices = []
+        for device in devices:
+            enabled_devices.append({
+                "id": device["id"],
+                "enabled": device["supported"] and device["id"] == "cpu",
+            })
+        if not any(device["enabled"] for device in enabled_devices):
+            enabled_devices[0]["enabled"] = bool(devices[0]["supported"])
+        return enabled_devices
 
 
 def _map_scale_mode(scale_mode):
@@ -308,7 +413,7 @@ def _map_scale_mode(scale_mode):
     return 0
 
 
-def build_script_params(props):
+def build_script_params(props, device_settings=None):
     params = {
         "pack_op_type": 0,
         "pinned_as_others": False,
@@ -316,14 +421,29 @@ def build_script_params(props):
         "margin": float(props.margin),
         "scale_mode": _map_scale_mode(props.scale_mode),
         "arrange_non_packed": False,
-        "pack_strategy": 0,
+        "pack_strategy": {
+            "strategy": 0,
+            "start_corner": 0,
+        },
         "rotation_enable": bool(props.rotation_enable),
         "pre_rotation_disable": False,
         "rotation_step": int(props.rotation_step),
         "flipping_enable": False,
         "lock_overlapping_mode": 0,
+        "lock_group_iparam_name": None,
         "normalize_scale": False,
+        "normalize_space": 0,
+        "norm_multiplier_iparam_name": None,
+        "norm_group_iparam_name": None,
+        "track_group_iparam_name": None,
+        "track_groups_props": None,
+        "rotation_step_iparam_name": None,
+        "tdensity_set_before_pack": False,
+        "tdensity_value": 0.0,
+        "tdensity_scale_length": 1.0,
         "target_boxes": [[0.0, 0.0, 1.0, 1.0]],
+        "__device_settings": device_settings or [],
+        "__grouping_scheme": None,
         "__skip_topology_parsing": False,
         "__disable_immediate_uv_update": True,
         "__disable_tips": True,
@@ -461,17 +581,46 @@ def _parse_out_islands_message(msg):
     return out_islands
 
 
-def _collect_engine_result(proc):
+def _uvpackmaster_timeout(props):
+    search_time = float(getattr(props, "search_time", 0.0) or 0.0)
+    if search_time > 0.01:
+        return max(30.0, search_time + UVPM_TIMEOUT_GRACE_SECONDS)
+    return UVPM_DEFAULT_TIMEOUT_SECONDS
+
+
+def _collect_engine_result(proc, timeout_seconds):
     result = UvpmRunResult()
     progress_queue = queue.Queue()
     worker = threading.Thread(target=_connection_thread, args=(proc.stdout, progress_queue), daemon=True)
     worker.start()
+    deadline = time.monotonic() + max(1.0, float(timeout_seconds))
 
     while True:
-        item = progress_queue.get()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            _terminate_process(proc)
+            stderr = _read_process_stderr(proc)
+            detail = f" Engine stderr: {stderr}" if stderr else ""
+            raise UVPackmasterError(
+                f"UVPackmaster timed out after {timeout_seconds:.0f}s. "
+                "The external engine was terminated to keep Blender responsive."
+                f"{detail}"
+            )
+
+        try:
+            item = progress_queue.get(timeout=min(0.5, remaining))
+        except queue.Empty:
+            if proc.poll() is not None:
+                stderr = _read_process_stderr(proc)
+                detail = f" Engine stderr: {stderr}" if stderr else ""
+                raise UVPackmasterError(
+                    f"UVPackmaster exited before sending a completion message (retcode {proc.returncode}).{detail}"
+                )
+            continue
+
         if isinstance(item, Exception):
             if proc.poll() is None:
-                proc.terminate()
+                _terminate_process(proc)
             raise UVPackmasterError(f"UVPackmaster communication failed: {item}")
 
         msg = item
@@ -481,7 +630,7 @@ def _collect_engine_result(proc):
             phase = _force_read_int(msg)
             if phase == UvpmPhaseCode.DONE:
                 _send_finish_confirmation(proc)
-                proc.wait(timeout=300)
+                proc.wait(timeout=min(30.0, max(1.0, deadline - time.monotonic())))
                 worker.join(timeout=5)
                 result.retcode = proc.returncode
                 return result
@@ -510,10 +659,11 @@ def run_uvpackmaster(bm, uv_layer, props):
     if selected_count <= 0:
         raise UVPackmasterError("No UV faces available for UVPackmaster packing.")
 
-    script_params = build_script_params(props)
+    engine_exec = status["exec_path"]
+    device_settings = _read_engine_device_settings(engine_exec)
+    script_params = build_script_params(props, device_settings=device_settings)
     payload = _encode_string(json.dumps(script_params)) + serialized_maps
 
-    engine_exec = status["exec_path"]
     creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     args = [
         engine_exec,
@@ -532,13 +682,15 @@ def run_uvpackmaster(bm, uv_layer, props):
         args,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         creationflags=creation_flags,
         env=env,
     )
     proc.stdin.write(payload)
     proc.stdin.flush()
-    return _collect_engine_result(proc)
+    result = _collect_engine_result(proc, _uvpackmaster_timeout(props))
+    result.engine_stderr = _read_process_stderr(proc)
+    return result
 
 
 def _apply_transform_to_faces(face_group, uv_layer, matrix):

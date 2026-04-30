@@ -1,16 +1,15 @@
 """
-op_packing.py — Island Packing Engine for UV Atlas Optimization
-================================================================
-UAV Topology Optimizer — Standalone packing module.
+op_packing.py - Island Packing Engine for UV Atlas Optimization
+===============================================================
+MeshForge UAV - standalone packing module.
 
 Operators:
-  UAV_OT_uv_pack       — Island packing engine (Skyline / MaxRects)
-  UAV_OT_uv_pack_reset — Reset stored best occupancy
+  UAV_OT_uv_pack         - Island packing via UVPM addon, Blender native, or C++ native
+  UAV_OT_uv_pack_reset   - Reset stored best occupancy
+  UAV_OT_uvpm_sync_props - Sync UAV packing settings to the UVPackmaster addon
 
-This module implements optimized 2D bin packing algorithms for UV islands:
-  - Skyline: Linear-time greedy placement
-  - MaxRects: Rectangle packing with multiple heuristics
-  - Optimizers: Iterative search, Simulated Annealing
+The current UI exposes UVPackmaster Addon, Blender Native and C++ Native.
+Legacy Python/subprocess helpers are kept internal for compatibility with older files.
 """
 
 import bpy
@@ -23,6 +22,7 @@ from bpy.props import (
     BoolProperty, EnumProperty, FloatProperty, IntProperty,
     StringProperty, FloatVectorProperty,
 )
+from . import uvpm_addon, uvpm_bridge
 from .uv_utils import (
     _angles,
     _area,
@@ -38,16 +38,17 @@ from .uv_utils import (
     _scale_island_from_center,
     _translate,
 )
-from .uvpm_bridge import (
-    UVPackmasterError,
-    apply_uvpackmaster_result,
-    auto_detect_engine_path,
-    get_engine_status,
-    run_uvpackmaster,
-)
 
 
 _MASK_META = {}
+
+
+def _prepare_pack_islands(islands, bm, uv_layer, props):
+    """Normalize islands and optionally equalize texel density before packing."""
+    for faces in islands:
+        _normalize(faces, uv_layer)
+    _equalize_island_scales(islands, bm, uv_layer, getattr(props, "density_weight", 0.0))
+    return _save(bm, uv_layer)
 
 def _layout_is_out_of_bounds(islands, uv_layer, epsilon=1e-6):
     """Return True if any island extends outside the 0-1 UV tile."""
@@ -321,6 +322,60 @@ def _clear_pack_best_occupancy(obj, uv_layer):
 def _sync_pack_best_occupancy(props, obj, uv_layer):
     props.best_ever_occupancy = _get_pack_best_occupancy(obj, uv_layer)
     return props.best_ever_occupancy
+
+
+def _store_pack_run_stats(obj, bm, uv_layer, props, method_name, elapsed, iterations=1):
+    """Update the UI statistics after any packing backend finishes."""
+    islands = _get_uv_islands(bm, uv_layer)
+    occupancy = min(sum(_area(faces, uv_layer) for faces in islands), 1.0) if islands else 0.0
+    prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+    props.best_ever_occupancy = _set_pack_best_occupancy(obj, uv_layer, max(prev_best, occupancy))
+    props.last_occupancy = occupancy * 100.0
+    props.last_iterations = max(1, int(iterations))
+    props.last_time = float(elapsed)
+    props.last_method = method_name
+    return occupancy
+
+
+def _cpp_pack_available():
+    """Return True when the native C++ pack library can be loaded."""
+    try:
+        from .uvpack_lib import get_lib
+        get_lib()
+        return True
+    except Exception:
+        return False
+
+
+def _select_auto_pack_engine(props):
+    """Choose the best available pack route exposed by the current UI."""
+    del props
+    if uvpm_addon.UVPmAddonData.is_installed_as_addon():
+        return 'UVPACKMASTER_ADDON'
+    if _cpp_pack_available():
+        return 'CPP_NATIVE'
+    return 'BLENDER_NATIVE'
+
+
+def _capture_uv_signature(bm, uv_layer):
+    """Capture a compact UV snapshot for change detection."""
+    return [
+        tuple((float(loop[uv_layer].uv.x), float(loop[uv_layer].uv.y)) for loop in face.loops)
+        for face in bm.faces
+    ]
+
+
+def _uv_signature_changed(before, bm, uv_layer, epsilon=1e-6):
+    after = _capture_uv_signature(bm, uv_layer)
+    if len(before) != len(after):
+        return True
+    for face_before, face_after in zip(before, after):
+        if len(face_before) != len(face_after):
+            return True
+        for (bu, bv), (au, av) in zip(face_before, face_after):
+            if abs(bu - au) > epsilon or abs(bv - av) > epsilon:
+                return True
+    return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -602,9 +657,7 @@ def run_packing_engine(obj, bm, uv_layer, props, report_fn=None):
         )
 
     data = []
-    for faces in islands:
-        _normalize(faces, uv_layer)
-    _equalize_island_scales(islands, bm, uv_layer, getattr(props, "density_weight", 0.0))
+    _prepare_pack_islands(islands, bm, uv_layer, props)
     for faces in islands:
         w, h = _normalize(faces, uv_layer)
         entry = {'w': w, 'h': h, 'area': _area(faces, uv_layer)}
@@ -766,11 +819,33 @@ def run_blender_native_pack(obj, bm, uv_layer, props, report_fn=None):
     t0     = time.time()
     margin = _eff_margin(props)
     prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
+    islands = _get_uv_islands(bm, uv_layer)
+    if not islands:
+        if report_fn:
+            report_fn({'WARNING'}, "No UV islands found.")
+        return
+
+    _prepare_pack_islands(islands, bm, uv_layer, props)
+    before_pack = _capture_uv_signature(bm, uv_layer)
 
     bpy.ops.mesh.select_all(action='SELECT')
     _call_blender_native_pack(props, margin)
 
-    islands   = _get_uv_islands(bm, uv_layer)
+    if not _uv_signature_changed(before_pack, bm, uv_layer):
+        elapsed = time.time() - t0
+        props.best_ever_occupancy = prev_best
+        props.last_occupancy = min(sum(_area(f, uv_layer) for f in islands), 1.0) * 100.0
+        props.last_iterations = 1
+        props.last_time = elapsed
+        props.last_method = f"Blender Native ({props.native_shape_method.title()}) (no-op)"
+        if report_fn:
+            report_fn(
+                {'WARNING'},
+                "Blender native pack executed without changing the UV layout. "
+                "Use Auto (Optimized) or confirm the pack dialog manually."
+            )
+        return
+
     occupancy = min(sum(_area(f, uv_layer) for f in islands), 1.0)
     elapsed   = time.time() - t0
 
@@ -831,9 +906,7 @@ def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
         )
 
     islands_data = []
-    for faces in islands:
-        _normalize(faces, uv_layer)
-    _equalize_island_scales(islands, bm, uv_layer, getattr(props, "density_weight", 0.0))
+    _prepare_pack_islands(islands, bm, uv_layer, props)
     for i, faces in enumerate(islands):
         w, h = _normalize(faces, uv_layer)
         entry = {'id': i, 'w': w, 'h': h, 'area': _area(faces, uv_layer)}
@@ -874,6 +947,7 @@ def run_cpp_pack(obj, bm, uv_layer, props, report_fn=None):
     if (cur_oob and best_occ < 0.0) or ((not cur_oob) and best_occ <= min_occ + 1e-6):
         _restore(bm, uv_layer, cur_uvs)
         props.best_ever_occupancy = prev_best
+        props.last_occupancy = cur_occ * 100.0
         props.last_iterations = props.precision
         props.last_time = elapsed
         props.last_method = f"C++ {props.packing_method}+{props.optimizer} (no improvement)"
@@ -953,6 +1027,7 @@ def run_uvpackmaster_pack(obj, bm, uv_layer, props, report_fn=None):
     cur_oob = _layout_is_out_of_bounds(islands, uv_layer)
     prev_best = _sync_pack_best_occupancy(props, obj, uv_layer)
     custom_scale = float(getattr(props, "custom_scale", 1.0)) if props.scale_mode == 'CUSTOM' else 1.0
+    _prepare_pack_islands(islands, bm, uv_layer, props)
 
     if report_fn:
         status_msg = (
@@ -966,20 +1041,28 @@ def run_uvpackmaster_pack(obj, bm, uv_layer, props, report_fn=None):
         )
 
     try:
-        run_result = run_uvpackmaster(bm, uv_layer, props)
+        run_result = uvpm_bridge.run_uvpackmaster(bm, uv_layer, props)
         if not run_result.has_solution:
             _restore(bm, uv_layer, cur_uvs)
             props.best_ever_occupancy = prev_best
             props.last_iterations = props.precision
             props.last_time = time.time() - t0
             props.last_method = "UVPackmaster 3.4.4 (no solution)"
-            details = run_result.error_messages or run_result.warning_messages
+            stderr_details = [
+                line.strip()
+                for line in getattr(run_result, "engine_stderr", "").splitlines()
+                if line.strip()
+            ]
+            details = run_result.error_messages or run_result.warning_messages or stderr_details
             if report_fn:
-                report_fn({'ERROR'}, details[0] if details else "UVPackmaster returned no valid placement.")
+                report_fn(
+                    {'ERROR'},
+                    details[0] if details else f"UVPackmaster returned no valid placement (retcode {run_result.retcode})."
+                )
             return
 
-        apply_uvpackmaster_result(bm, uv_layer, run_result, custom_scale=custom_scale)
-    except UVPackmasterError as exc:
+        uvpm_bridge.apply_uvpackmaster_result(bm, uv_layer, run_result, custom_scale=custom_scale)
+    except uvpm_bridge.UVPackmasterError as exc:
         _restore(bm, uv_layer, cur_uvs)
         props.best_ever_occupancy = prev_best
         props.last_iterations = props.precision
@@ -1031,13 +1114,12 @@ def run_uvpackmaster_pack(obj, bm, uv_layer, props, report_fn=None):
 
 
 class UAV_OT_uv_pack(Operator):
-    """Pack UV islands using the embedded Skyline/MaxRects engine"""
+    """Pack UV islands through UVPM addon, Blender native, or the C++ solver"""
     bl_idname  = "uav.uv_pack"
     bl_label   = "Pack Islands"
     bl_description = (
-        "Pack UV islands using Skyline or MaxRects packer with "
-        "Iterative or Simulated Annealing optimizer. "
-        "Only applies result when it improves on the current layout."
+        "Pack UV islands using the current engine selection. "
+        "Auto mode prefers UVPackmaster addon, then C++ Native, then Blender Native."
     )
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -1050,6 +1132,10 @@ class UAV_OT_uv_pack(Operator):
     def execute(self, context):
         uvp = context.scene.uav_uvpack_props
         obj = context.active_object
+
+        engine = uvp.pack_engine
+        if engine == 'AUTO':
+            engine = _select_auto_pack_engine(uvp)
 
         was_edit = (obj.mode == 'EDIT')
         if not was_edit:
@@ -1064,19 +1150,76 @@ class UAV_OT_uv_pack(Operator):
                 bpy.ops.object.mode_set(mode='OBJECT')
             return {'CANCELLED'}
 
-        if uvp.pack_engine == 'BLENDER_NATIVE':
+        if engine == 'UVPACKMASTER_ADDON':
+            bmesh.update_edit_mesh(obj.data)
+            manager = uvpm_addon.UVPmAddonManager()
+            ok, msg = manager.pack(context, uvp)
+            if ok:
+                if obj.mode != 'EDIT':
+                    bpy.ops.object.mode_set(mode='EDIT')
+                bm = bmesh.from_edit_mesh(obj.data)
+                bm.faces.ensure_lookup_table()
+                uv_layer = bm.loops.layers.uv.active
+                if uv_layer is None:
+                    self.report({'ERROR'}, "UVPackmaster finished but no active UV map is available.")
+                    if not was_edit:
+                        bpy.ops.object.mode_set(mode='OBJECT')
+                    return {'CANCELLED'}
+                occupancy = _store_pack_run_stats(
+                    obj,
+                    bm,
+                    uv_layer,
+                    uvp,
+                    f"UVPackmaster Addon {manager.uvpm_version}",
+                    manager.last_elapsed,
+                    iterations=1,
+                )
+                bmesh.update_edit_mesh(obj.data)
+                if not was_edit:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                self.report({'INFO'}, f"{msg} Occupancy: {occupancy*100:.1f}%.")
+                return {'FINISHED'}
+            uvp.last_method = "UVPackmaster Addon (failed)"
+            uvp.last_iterations = 1
+            uvp.last_time = manager.last_elapsed
+            if not was_edit:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            self.report({'WARNING'}, msg)
+            return {'CANCELLED'}
+
+        if engine == 'BLENDER_NATIVE':
             run_blender_native_pack(obj, bm, uv_layer, uvp, self.report)
-        elif uvp.pack_engine == 'CPP_NATIVE':
+        elif engine == 'CPP_NATIVE':
             run_cpp_pack(obj, bm, uv_layer, uvp, self.report)
-        elif uvp.pack_engine == 'UVPACKMASTER':
-            run_uvpackmaster_pack(obj, bm, uv_layer, uvp, self.report)
         else:
-            run_packing_engine(obj, bm, uv_layer, uvp, self.report)
+            run_blender_native_pack(obj, bm, uv_layer, uvp, self.report)
         bmesh.update_edit_mesh(obj.data)
 
         if not was_edit:
             bpy.ops.object.mode_set(mode='OBJECT')
         return {'FINISHED'}
+
+
+class UAV_OT_uvpm_sync_props(Operator):
+    """Copy UAV packing settings to UVPackmaster without running pack"""
+    bl_idname = "uav.uvpm_sync_props"
+    bl_label = "Sync to UVPackmaster"
+    bl_description = "Transfer MeshForge UAV packing settings to the installed UVPackmaster addon"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (
+            getattr(context.scene, "uav_uvpack_props", None) is not None and
+            uvpm_addon.UVPmAddonData.is_installed_as_addon()
+        )
+
+    def execute(self, context):
+        uvp = context.scene.uav_uvpack_props
+        manager = uvpm_addon.UVPmAddonManager()
+        ok, msg = manager.sync_only(context, uvp)
+        self.report({'INFO'} if ok else {'WARNING'}, msg)
+        return {'FINISHED'} if ok else {'CANCELLED'}
 
 
 class UAV_OT_uvpm_detect_engine(Operator):
@@ -1088,14 +1231,14 @@ class UAV_OT_uvpm_detect_engine(Operator):
 
     def execute(self, context):
         uvp = context.scene.uav_uvpack_props
-        detected = auto_detect_engine_path()
+        detected = uvpm_bridge.auto_detect_engine_path()
         if detected:
             uvp.uvpm_engine_path = detected["engine_root"]
             self.report({'INFO'}, f"UVPackmaster detected at {detected['engine_root']}")
             return {'FINISHED'}
 
         uvp.uvpm_engine_path = ""
-        status = get_engine_status("")
+        status = uvpm_bridge.get_engine_status("")
         self.report({'WARNING'}, status.get("error", "UVPackmaster was not detected on this machine."))
         return {'CANCELLED'}
 

@@ -4,30 +4,20 @@ from bpy.props import (
     EnumProperty, StringProperty, FloatVectorProperty,
     PointerProperty,
 )
-from bpy.types import PropertyGroup
-from .uvpm_bridge import get_engine_status
+from bpy.types import Collection, PropertyGroup
 
 
-def _uv_pack_engine_items(_self, context):
-    items = [
-        ('BLENDER_NATIVE', "Blender Native",
-         "Blender's built-in Pack Islands operator - reliable baseline"),
-        ('PYTHON', "Python Solver",
-         "Embedded Skyline / MaxRects in pure Python - no compilation needed"),
-        ('CPP_NATIVE', "C++ Native (fast)",
-         "Same algorithm compiled to native C++ - 80-100x faster than Python. "
-         "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
-    ]
-
-    scene = getattr(context, "scene", None) if context else None
-    props = getattr(scene, "uav_uvpack_props", None) if scene else None
-    configured_path = getattr(props, "uvpm_engine_path", "") if props else ""
-    if get_engine_status(configured_path).get("available"):
-        items.append(
-            ('UVPACKMASTER', "UVPackmaster 3",
-             "Use the external UVPackmaster installation detected on this machine"),
-        )
-    return items
+UV_PACK_ENGINE_ITEMS = (
+    ('AUTO', "Auto (Optimized)",
+     "Prefer UVPackmaster addon, then C++ Native, then Blender Native"),
+    ('UVPACKMASTER_ADDON', "UVPackmaster Addon",
+     "Delegate packing to the UVPackmaster addon installed in Blender"),
+    ('BLENDER_NATIVE', "Blender Native",
+     "Blender's built-in Pack Islands operator - reliable baseline"),
+    ('CPP_NATIVE', "C++ Native (fast)",
+     "Same algorithm compiled to native C++ - 80-100x faster than Python. "
+     "Requires lib_uvpack compiled from uvpack_cpp/ with CMake"),
+)
 
 class UAVOptimizerProperties(PropertyGroup):
 
@@ -730,8 +720,8 @@ class UAVUVPackProperties(PropertyGroup):
     pack_engine: EnumProperty(
         name="Engine",
         description="Which packing backend to use",
-        items=_uv_pack_engine_items,
-        default='PYTHON',
+        items=UV_PACK_ENGINE_ITEMS,
+        default='AUTO',
     )
     uvpm_engine_path: StringProperty(
         name="UVPackmaster Path",
@@ -756,6 +746,26 @@ class UAVUVPackProperties(PropertyGroup):
         name="Merge Overlap",
         description="Treat overlapping islands as a single unit before packing",
         default=False,
+    )
+    lock_overlapping_enable: BoolProperty(
+        name="Lock Overlapping",
+        description="Forward overlapping-island lock mode to UVPackmaster addon",
+        default=False,
+    )
+    lock_overlapping_mode: EnumProperty(
+        name="Lock Overlapping Mode",
+        description="UVPackmaster overlapping-island lock mode",
+        items=[
+            ('0', "Any Part", "Lock islands when any UV area overlaps"),
+            ('1', "Exact", "Lock exactly overlapping islands"),
+            ('2', "UV Island", "Use UV island based overlap locking"),
+        ],
+        default='0',
+    )
+    uvp3_packing_method: StringProperty(
+        name="UVPM3 Mode",
+        description="UVPackmaster 3 mode_id used for versions before the 3.4 option-set API",
+        default="pack.single_tile",
     )
 
     packing_method: EnumProperty(
@@ -873,13 +883,16 @@ class UAVUVPackProperties(PropertyGroup):
     )
     search_time: FloatProperty(
         name="Search Time (s)",
-        description="Maximum wall-clock time for the optimiser. 0 = no limit",
+        description=(
+            "Maximum wall-clock time for the optimiser. 0 = no limit for C++; "
+            "UVPackmaster addon direct calls use a safe 10s heuristic timeout"
+        ),
         default=0.0, min=0.0, max=120.0, precision=1,
     )
     advanced_heuristic: BoolProperty(
         name="Advanced Heuristic",
-        description="Extra per-island rotation refinement pass after main optimisation",
-        default=False,
+        description="Enable UVPackmaster heuristic search and the C++ per-island rotation refinement pass",
+        default=True,
     )
     sa_initial_temp: FloatProperty(
         name="Initial Temperature",
@@ -1162,6 +1175,11 @@ class UAVExportProperties(PropertyGroup):
         name="LOD Collection",
         description="Collection exported when Scope is LOD Collection. Leave empty to reuse the LOD stage collection",
         default="",
+    )
+    collection_ref: PointerProperty(
+        name="LOD Collection",
+        description="Collection exported when Scope is LOD Collection",
+        type=Collection,
     )
     global_scale: FloatProperty(
         name="Global Scale",
