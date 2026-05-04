@@ -1,6 +1,22 @@
 import bpy
 from bpy.types import Operator
 
+
+def _capture_source_state(context, obj):
+    return {
+        "hidden": obj.hide_get(),
+        "selected": obj.select_get(),
+        "active": context.view_layer.objects.active is obj,
+    }
+
+
+def _restore_source_state(context, obj, state):
+    obj.hide_set(state["hidden"])
+    obj.select_set(state["selected"])
+    if state["active"] or state["selected"]:
+        context.view_layer.objects.active = obj
+
+
 class UAV_OT_quadriflow(Operator):
     bl_idname = "uav.quadriflow_retopo"
     bl_label = "Run QuadriFlow"
@@ -41,6 +57,7 @@ class UAV_OT_quadriflow(Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         created_objects = []
+        restored_sources = []
 
         self.report({'INFO'}, f"Starting QuadriFlow (Target: {target_quads} quads). Blender may freeze for a moment...")
 
@@ -51,6 +68,7 @@ class UAV_OT_quadriflow(Operator):
             bpy.ops.object.select_all(action='DESELECT')
             obj.select_set(True)
             context.view_layer.objects.active = obj
+            source_state = _capture_source_state(context, obj)
             
             bpy.ops.object.duplicate()
             new_obj = context.active_object
@@ -85,6 +103,8 @@ class UAV_OT_quadriflow(Operator):
                 self.report({'ERROR'}, f"QuadriFlow failed on {new_obj.name}. Check console.")
                 print(f"QuadriFlow Error: {e}")
                 bpy.data.objects.remove(new_obj, do_unlink=True)
+                _restore_source_state(context, obj, source_state)
+                restored_sources.append(obj)
 
         # ==================================================================
         # 4. LIMPEZA FINAL E SELE--O
@@ -93,11 +113,18 @@ class UAV_OT_quadriflow(Operator):
         for created_obj in created_objects:
             if created_obj:
                 created_obj.select_set(True)
+        for source_obj in restored_sources:
+            if source_obj:
+                source_obj.select_set(True)
                 
         if created_objects:
             context.view_layer.objects.active = created_objects[0]
             self.report({'INFO'}, f"QuadriFlow Completed Successfully! Generated {len(created_objects)} quad meshes in '{qflow_col_name}'.")
             return {'FINISHED'}
+        elif restored_sources:
+            context.view_layer.objects.active = restored_sources[0]
+            self.report({'WARNING'}, "QuadriFlow failed to generate any meshes.")
+            return {'CANCELLED'}
         else:
             self.report({'WARNING'}, "QuadriFlow failed to generate any meshes.")
             return {'CANCELLED'}

@@ -1,6 +1,22 @@
 import bpy
 from bpy.types import Operator
 
+
+def _capture_source_state(context, obj):
+    return {
+        "hidden": obj.hide_get(),
+        "selected": obj.select_get(),
+        "active": context.view_layer.objects.active is obj,
+    }
+
+
+def _restore_source_state(context, obj, state):
+    obj.hide_set(state["hidden"])
+    obj.select_set(state["selected"])
+    if state["active"] or state["selected"]:
+        context.view_layer.objects.active = obj
+
+
 class UAV_OT_voxel_retopo(Operator):
     bl_idname = "uav.voxel_retopo"
     bl_label = "Run Voxel Remesh"
@@ -36,6 +52,7 @@ class UAV_OT_voxel_retopo(Operator):
             bpy.ops.object.mode_set(mode='OBJECT')
 
         created_objects = []
+        restored_sources = []
 
         self.report({'INFO'}, f"Starting Voxel Remesh (Size: {voxel_size}m, Thickness: {solidify_thickness}m)...")
 
@@ -44,6 +61,7 @@ class UAV_OT_voxel_retopo(Operator):
             bpy.ops.object.select_all(action='DESELECT')
             obj.select_set(True)
             context.view_layer.objects.active = obj
+            source_state = _capture_source_state(context, obj)
 
             bpy.ops.object.duplicate()
             new_obj      = context.active_object
@@ -76,16 +94,24 @@ class UAV_OT_voxel_retopo(Operator):
                 self.report({'ERROR'}, f"Voxel Remesh failed on {new_obj.name}.")
                 print(f"Voxel Error: {e}")
                 bpy.data.objects.remove(new_obj, do_unlink=True)
+                _restore_source_state(context, obj, source_state)
+                restored_sources.append(obj)
 
         # 3. Cleanup & reselect results
         bpy.ops.object.select_all(action='DESELECT')
         for created_obj in created_objects:
             if created_obj:
                 created_obj.select_set(True)
+        for source_obj in restored_sources:
+            if source_obj:
+                source_obj.select_set(True)
 
         if created_objects:
             context.view_layer.objects.active = created_objects[0]
             self.report({'INFO'}, "Voxel Remesh Completed Successfully without holes!")
             return {'FINISHED'}
+        elif restored_sources:
+            context.view_layer.objects.active = restored_sources[0]
+            return {'CANCELLED'}
         else:
             return {'CANCELLED'}
