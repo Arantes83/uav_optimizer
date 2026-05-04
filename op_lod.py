@@ -84,6 +84,16 @@ def _duplicate_mesh_object(obj, new_name, target_collection):
     return new_obj
 
 
+def _remove_object_safely(obj):
+    if obj is None:
+        return False
+    try:
+        bpy.data.objects.remove(obj, do_unlink=True)
+        return True
+    except ReferenceError:
+        return False
+
+
 _LOD_SUFFIX_RE = re.compile(r'(_LOD\d+|_PREP|_FASTDECIMATE|_TRUEQEM|_EDGELENGTH|_QEM_Simplified)$')
 
 
@@ -235,7 +245,11 @@ class UAV_OT_generate_lods(Operator):
     def _process_step(self, context, entry):
         level = entry['level']
         new_obj = _duplicate_mesh_object(self._prev_obj, f'{self._base_name}_LOD{level}', self._lod_col)
-        _decimate_obj(context, new_obj, entry['step_ratio'])
+        try:
+            _decimate_obj(context, new_obj, entry['step_ratio'])
+        except Exception:
+            _remove_object_safely(new_obj)
+            raise
         self._created.append(new_obj)
         self._prev_obj = new_obj
 
