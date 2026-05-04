@@ -85,6 +85,62 @@ MANAGED_NODE_NAMES = {
     FINAL_NODE_PREFIX + "EMISSION",
 }
 
+BAKE_OPERATOR_SUCCESS_FLAGS = {"RUNNING_MODAL", "FINISHED"}
+BAKE_OPERATOR_CANCEL_FLAGS = {"CANCELLED"}
+BAKE_IMAGE_DIRTY_TIMEOUT_SECONDS = 30.0 * 60.0
+
+
+def _normalize_operator_result(result):
+    if result is None:
+        return set()
+    if isinstance(result, str):
+        return {result}
+    try:
+        return {str(flag) for flag in result}
+    except TypeError:
+        return {str(result)}
+
+
+def _format_operator_result(result):
+    flags = _normalize_operator_result(result)
+    if not flags:
+        return "{}"
+    return "{" + ", ".join(sorted(flags)) + "}"
+
+
+def _validate_bake_operator_result(result):
+    flags = _normalize_operator_result(result)
+    if flags & BAKE_OPERATOR_CANCEL_FLAGS:
+        raise RuntimeError(f"Blender bake canceled with status {_format_operator_result(flags)}")
+    if flags & BAKE_OPERATOR_SUCCESS_FLAGS:
+        return flags
+    raise RuntimeError(f"Blender bake returned unexpected status {_format_operator_result(flags)}")
+
+
+def _invoke_bake_operator(blender_type):
+    return _validate_bake_operator_result(
+        bpy.ops.object.bake("INVOKE_DEFAULT", type=blender_type)
+    )
+
+
+def _is_bake_image_ready(
+    image,
+    started_at,
+    timeout_seconds=BAKE_IMAGE_DIRTY_TIMEOUT_SECONDS,
+    now_fn=None,
+):
+    if getattr(image, "is_dirty", False):
+        return True
+
+    now = now_fn() if now_fn is not None else time.perf_counter()
+    elapsed = max(0.0, now - started_at)
+    if elapsed >= timeout_seconds:
+        image_name = getattr(image, "name", "<unnamed>")
+        raise TimeoutError(
+            f"Bake timed out after {timeout_seconds:.0f}s waiting for image '{image_name}' to update."
+        )
+    return False
+
 
 def _find_output_node(nodes):
     for node in nodes:
@@ -884,9 +940,9 @@ class UAV_OT_detail_baking(Operator):
 
                     blender_type = _configure_bake_settings(context, props, map_id)
 
-                    while bpy.ops.object.bake("INVOKE_DEFAULT", type=blender_type) != {"RUNNING_MODAL"}:
-                        yield 1
-                    while not image.is_dirty:
+                    bake_started_at = time.perf_counter()
+                    _invoke_bake_operator(blender_type)
+                    while not _is_bake_image_ready(image, bake_started_at):
                         yield 1
 
                 finally:
