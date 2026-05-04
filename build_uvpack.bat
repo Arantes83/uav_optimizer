@@ -8,6 +8,10 @@ set "SRC_DIR=%ROOT_DIR%\uvpack_cpp"
 set "OUT_DIR=%ROOT_DIR%\uvpack_lib"
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VCVARS="
+set "UVPACK_VERSION_TAG=121"
+set "VERSIONED_DLL=lib_uvpack_%UVPACK_VERSION_TAG%.dll"
+set "VERSIONED_LIB=lib_uvpack_%UVPACK_VERSION_TAG%.lib"
+set "VERSIONED_EXP=lib_uvpack_%UVPACK_VERSION_TAG%.exp"
 
 if not exist "%SRC_DIR%\uvpack.cpp" (
     echo [ERROR] Arquivo fonte nao encontrado: "%SRC_DIR%\uvpack.cpp"
@@ -62,11 +66,21 @@ move /Y "lib_uvpack.dll" "%OUT_DIR%\lib_uvpack.dll" >nul || (
     echo [ERROR] Falha ao mover lib_uvpack.dll para "%OUT_DIR%"
     exit /b 1
 )
+copy /Y "%OUT_DIR%\lib_uvpack.dll" "%OUT_DIR%\%VERSIONED_DLL%" >nul || (
+    popd
+    echo [ERROR] Falha ao copiar "%VERSIONED_DLL%" para "%OUT_DIR%"
+    exit /b 1
+)
 
 if exist "lib_uvpack.lib" (
     move /Y "lib_uvpack.lib" "%OUT_DIR%\lib_uvpack.lib" >nul || (
         popd
         echo [ERROR] Falha ao mover lib_uvpack.lib para "%OUT_DIR%"
+        exit /b 1
+    )
+    copy /Y "%OUT_DIR%\lib_uvpack.lib" "%OUT_DIR%\%VERSIONED_LIB%" >nul || (
+        popd
+        echo [ERROR] Falha ao copiar "%VERSIONED_LIB%" para "%OUT_DIR%"
         exit /b 1
     )
 )
@@ -77,10 +91,16 @@ if exist "lib_uvpack.exp" (
         echo [ERROR] Falha ao mover lib_uvpack.exp para "%OUT_DIR%"
         exit /b 1
     )
+    copy /Y "%OUT_DIR%\lib_uvpack.exp" "%OUT_DIR%\%VERSIONED_EXP%" >nul || (
+        popd
+        echo [ERROR] Falha ao copiar "%VERSIONED_EXP%" para "%OUT_DIR%"
+        exit /b 1
+    )
 )
 
 popd
 
 echo [OK] Build concluido com sucesso.
 echo      DLL: "%OUT_DIR%\lib_uvpack.dll"
+echo      DLL versionada: "%OUT_DIR%\%VERSIONED_DLL%"
 exit /b 0

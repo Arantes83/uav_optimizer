@@ -59,26 +59,50 @@ def _parse_version_tuple(version_text: str):
     return tuple(numbers) if numbers else (0, 0, 0)
 
 
+def _library_pattern_and_fallback(system):
+    if system == 'Windows':
+        return 'lib_uvpack_*.dll', 'lib_uvpack.dll'
+    if system == 'Darwin':
+        return 'lib_uvpack_*.dylib', 'liblib_uvpack.dylib'
+    return 'lib_uvpack_*.so', 'liblib_uvpack.so'
+
+
+def _candidate_sort_key(candidate):
+    try:
+        modified_at = path.getmtime(candidate)
+    except OSError:
+        modified_at = -1.0
+    return modified_at, path.basename(candidate)
+
+
+def _collect_library_candidates(base_dir, system):
+    pattern, fallback = _library_pattern_and_fallback(system)
+    fallback_path = path.join(base_dir, fallback)
+    candidates = []
+    seen = set()
+
+    def add_candidate(candidate):
+        normalized = path.normcase(path.abspath(candidate))
+        if normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(candidate)
+
+    for candidate in glob(path.join(base_dir, pattern)):
+        add_candidate(candidate)
+    if path.exists(fallback_path):
+        add_candidate(fallback_path)
+
+    if not candidates:
+        return [fallback_path]
+    return sorted(candidates, key=_candidate_sort_key, reverse=True)
+
+
 class UVPackLib:
     def __init__(self):
         system = platform.system()
         base_dir = path.dirname(path.abspath(__file__))
-        if system == 'Windows':
-            pattern = 'lib_uvpack_*.dll'
-            fallback = 'lib_uvpack.dll'
-        elif system == 'Darwin':
-            pattern = 'lib_uvpack_*.dylib'
-            fallback = 'liblib_uvpack.dylib'
-        else:
-            pattern = 'lib_uvpack_*.so'
-            fallback = 'liblib_uvpack.so'
-
-        candidates = sorted(glob(path.join(base_dir, pattern)), reverse=True)
-        fallback_path = path.join(base_dir, fallback)
-        if fallback_path not in candidates and path.exists(fallback_path):
-            candidates.append(fallback_path)
-        if not candidates:
-            candidates = [fallback_path]
+        candidates = _collect_library_candidates(base_dir, system)
 
         load_errors = []
         loaded = None
