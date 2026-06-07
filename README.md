@@ -255,4 +255,4 @@ Validated against Blender `4.5.10 LTS` at `C:\Program Files\Blender Foundation\B
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+GPL-3.0-only. See [LICENSE](LICENSE).
