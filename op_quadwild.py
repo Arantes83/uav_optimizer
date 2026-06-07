@@ -23,6 +23,10 @@ from .quadwild_lib import Quadwild, QWException
 from .quadwild_util import bisect, exporter, importer
 
 
+QUADWILD_DEFAULT_CALLBACK_TIMES = [3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 90.0, 120.0]
+QUADWILD_DEFAULT_CALLBACK_GAPS = [0.005, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.3]
+
+
 class UAV_OT_quadwild(Operator):
     bl_idname  = "uav.quadwild_retopo"
     bl_label   = "Run QuadWild"
@@ -191,21 +195,21 @@ class UAV_OT_quadwild(Operator):
                 timeLimit                        = qw_props.time_limit,
                 gapLimit                         = qw_props.gap_limit,
                 minimumGap                       = qw_props.minimum_gap,
-                isometry                         = qw_props.isometry,
-                regularityQuadrilaterals         = qw_props.regularity_quads,
-                regularityNonQuadrilaterals      = qw_props.regularity_non_quads,
-                regularityNonQuadrilateralsWeight= qw_props.regularity_non_quads_weight,
-                alignSingularities               = qw_props.align_singularities,
-                alignSingularitiesWeight         = qw_props.align_singularities_weight,
-                repeatLosingConstraintsIterations= qw_props.repeat_losing_iters,
-                repeatLosingConstraintsQuads     = qw_props.repeat_losing_quads,
-                repeatLosingConstraintsNonQuads  = qw_props.repeat_losing_non_quads,
-                repeatLosingConstraintsAlign     = qw_props.repeat_losing_align,
-                hardParityConstraint             = qw_props.hard_parity,
+                isometry                         = True,
+                regularityQuadrilaterals         = True,
+                regularityNonQuadrilaterals      = True,
+                regularityNonQuadrilateralsWeight= 0.9,
+                alignSingularities               = True,
+                alignSingularitiesWeight         = 0.1,
+                repeatLosingConstraintsIterations= True,
+                repeatLosingConstraintsQuads     = False,
+                repeatLosingConstraintsNonQuads  = False,
+                repeatLosingConstraintsAlign     = True,
+                hardParityConstraint             = True,
                 flowConfig                       = qw_props.flow_config,
                 satsumaConfig                    = qw_props.satsuma_config,
-                callbackTimeLimit                = list(qw_props.callback_time_limit),
-                callbackGapLimit                 = list(qw_props.callback_gap_limit),
+                callbackTimeLimit                = QUADWILD_DEFAULT_CALLBACK_TIMES,
+                callbackGapLimit                 = QUADWILD_DEFAULT_CALLBACK_GAPS,
             )
 
             if qw_props.debug and qw_props.enable_smoothing:

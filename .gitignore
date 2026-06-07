@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+tests/
 .vscode/
 .edge_profile/
 puppeteer-config.json

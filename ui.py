@@ -159,6 +159,8 @@ class UAV_PT_main_panel(Panel):
                 row.prop(props, "qem_density_unit", text="")
             elif props.qem_target_mode == 'RATIO':
                 box.prop(props, "qem_target_ratio", text="Keep Ratio")
+            elif props.qem_target_mode == 'TRIANGLE_COUNT':
+                box.prop(props, "qem_target_triangle_count", text="Target Triangles")
             else:
                 box.prop(props, "qem_target_vertex_count", text="Target Vertices")
 
@@ -710,44 +712,11 @@ class UAV_PT_main_panel(Panel):
 
         box.separator(factor=0.4)
 
-        q_box = box.box()
-        q_box.label(text="Quality", icon='SETTINGS')
-        col = q_box.column(align=True)
-        col.use_property_split    = True
-        col.use_property_decorate = False
-        col.prop(qw, "isometry",                       text="Isometry")
-        col.prop(qw, "regularity_quads",                text="Regularity Quads")
-        col.prop(qw, "regularity_non_quads",             text="Regularity Non-Quads")
-        col.prop(qw, "regularity_non_quads_weight",      text="  Weight")
-        col.prop(qw, "align_singularities",              text="Align Singularities")
-        col.prop(qw, "align_singularities_weight",       text="  Weight")
-        col.prop(qw, "hard_parity",                      text="Hard Parity Constraint")
-
-        rl_box = box.box()
-        rl_box.label(text="Repeat Losing Constraints", icon='CON_ROTLIMIT')
-        col = rl_box.column(align=True)
-        col.use_property_split    = True
-        col.use_property_decorate = False
-        col.prop(qw, "repeat_losing_iters",     text="Iterations")
-        col.prop(qw, "repeat_losing_quads",     text="Quads")
-        col.prop(qw, "repeat_losing_non_quads", text="Non-Quads")
-        col.prop(qw, "repeat_losing_align",     text="Align")
-
-        box.separator(factor=0.4)
-
         col = box.column(align=True)
         col.use_property_split    = True
         col.use_property_decorate = False
         col.prop(qw, "flow_config",    text="Flow Config")
         col.prop(qw, "satsuma_config", text="Satsuma Config")
-
-        cb_box = box.box()
-        cb_box.label(text="Callback Schedule (8 checkpoints)", icon='TIME')
-        col = cb_box.column(align=True)
-        col.use_property_split    = True
-        col.use_property_decorate = False
-        col.prop(qw, "callback_time_limit", text="Time (s)")
-        col.prop(qw, "callback_gap_limit",  text="Gap")
 
         box.separator(factor=0.4)
 

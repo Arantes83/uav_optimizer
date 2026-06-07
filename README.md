@@ -10,8 +10,8 @@ MeshForge UAV is a Blender add-on for photogrammetry, LiDAR, terrain, and high-d
 
 - Add-on display name: `MeshForge UAV`
 - Python package folder: `uav_optimizer`
-- Blender version declared in the add-on: `4.5`
-- Current add-on version: `1.7.0`
+- Blender version declared in the add-on: `4.5.10 LTS`
+- Current add-on version: `1.2.3`
 - Package type: Blender 3D View sidebar add-on
 - Panel location: `View3D > Sidebar > MeshForge UAV`
 
@@ -69,16 +69,16 @@ Blender Native             Blender operator runtime  reliable baseline    fast  
 
 Required:
 
-- Blender `4.5` or newer
+- Blender `4.5.10 LTS`
 - Python 3 runtime embedded in Blender
 - Active mesh object with a UV map for UV packing, baking, and export stages
+- Bundled `uvpack_lib` DLL artifacts generated from `uvpack_cpp`
+- Bundled `quadwild_lib` binaries for QuadWild retopology
 
 Optional but supported:
 
 - UVPackmaster installed and enabled as a Blender add-on for the `UVPackmaster Addon` engine
 - Visual Studio 2022 Build Tools on Windows for rebuilding the C++ UV packer
-- `uvpack_lib` DLL artifacts generated from `uvpack_cpp`
-- `quadwild_lib` binaries for QuadWild retopology
 
 External requirements:
 
@@ -181,6 +181,19 @@ Current behavior:
 - Kept C++ Native packing with MaxRects, Skyline, Pixel Perfect, and Horizon Best Fit paths
 - Kept existing `uav.*` operator identifiers and scene property names for `.blend` compatibility
 
+### 2026-06-06
+
+- Updated the declared Blender target to `4.5.10 LTS`.
+- Hardened QEM simplification so generated meshes are validated before replacement.
+- Preserved the high-poly source mesh data while leaving the source hidden and the QEM output visible/active.
+- Removed QEM source backups; QEM now preserves the source and applies simplification only to the generated working copy.
+- Kept QEM output generation when the requested target is already reached, producing a preserved working copy instead of deleting the result.
+- Enforced QEM vertex targets for `VERTEX_COUNT` and `RATIO`, including the Fast Decimate fallback path.
+- Added QEM pipeline metadata so simplified outputs cannot be used as high-poly bake sources.
+- Reworked QEM target semantics: `RATIO`, `DENSITY`, and `TRIANGLE_COUNT` are enforced against source triangle count before cleanup, while `VERTEX_COUNT` remains vertex-based.
+- Guarded QEM pre/post cleanup so an aggressive weld or degenerate cleanup on the working copy cannot undershoot the requested target.
+- Triangulated QEM working copies before triangle-target Decimate and used temporary probe meshes to choose the closest result below the requested triangle target.
+
 ## Repository Layout
 
 ```text
@@ -238,8 +251,8 @@ Recommended runtime validation:
 6. Run `Island Packing` with `C++ Native`.
 7. Run `Island Packing` with `Blender Native`.
 
-Validated against Blender `4.5.9 LTS`.
+Validated against Blender `4.5.10 LTS` at `C:\Program Files\Blender Foundation\Blender 4.5\blender.exe`.
 
 ## License
 
-No license file is currently included in this repository.
+MIT. See [LICENSE](LICENSE).

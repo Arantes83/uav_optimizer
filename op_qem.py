@@ -20,6 +20,148 @@ ENGINE_LABELS = {
     'EDGE_LENGTH': 'Edge Length',
 }
 
+GEOMETRY_AREA_EPSILON = 1.0e-12
+
+
+def _activate_only(context, obj):
+    bpy.ops.object.select_all(action='DESELECT')
+    obj.hide_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+
+
+def _capture_source_state(context, obj):
+    return {
+        "hidden": obj.hide_get(),
+        "selected": obj.select_get(),
+        "active": context.view_layer.objects.active is obj,
+    }
+
+
+def _restore_source_state(context, obj, state):
+    if obj is None or state is None or obj.name not in bpy.data.objects:
+        return
+    obj.hide_set(state["hidden"])
+    obj.select_set(state["selected"])
+    if state["active"] or state["selected"]:
+        context.view_layer.objects.active = obj
+
+
+def _capture_mesh_signature(obj):
+    mesh = obj.data
+    uv_layers = []
+    for uv_layer in mesh.uv_layers:
+        uv_layers.append((
+            uv_layer.name,
+            tuple(
+                (
+                    float(uv_layer.data[loop_index].uv.x),
+                    float(uv_layer.data[loop_index].uv.y),
+                )
+                for loop_index in range(len(uv_layer.data))
+            ),
+        ))
+
+    return {
+        "vertex_count": len(mesh.vertices),
+        "vertices": tuple(tuple(float(coord) for coord in vertex.co) for vertex in mesh.vertices),
+        "edge_count": len(mesh.edges),
+        "edge_seams": tuple(bool(edge.use_seam) for edge in mesh.edges),
+        "face_count": len(mesh.polygons),
+        "faces": tuple(tuple(int(vertex_index) for vertex_index in poly.vertices) for poly in mesh.polygons),
+        "material_indices": tuple(int(poly.material_index) for poly in mesh.polygons),
+        "smooth_flags": tuple(bool(poly.use_smooth) for poly in mesh.polygons),
+        "materials": tuple(material.name if material is not None else None for material in mesh.materials),
+        "uv_layers": tuple(uv_layers),
+    }
+
+
+def _assert_source_mesh_unchanged(obj, before_signature):
+    after_signature = _capture_mesh_signature(obj)
+    if after_signature != before_signature:
+        raise RuntimeError(
+            f"QEM source mesh '{obj.name}' changed during simplification. "
+            "The generated mesh was discarded to preserve the high-poly source."
+        )
+
+
+def _set_source_metadata(source_obj, target_name):
+    source_obj["uav_role"] = "HIGH_SOURCE"
+    source_obj["uav_stage"] = "SOURCE"
+    source_obj["uav_can_be_bake_source"] = True
+    source_obj["uav_last_qem_target"] = target_name
+    if "uav_qem_source_backup" in source_obj:
+        del source_obj["uav_qem_source_backup"]
+
+
+def _set_qem_metadata(qem_obj, source_obj):
+    qem_obj["uav_role"] = "QEM_SIMPLIFIED"
+    qem_obj["uav_stage"] = "QEM"
+    qem_obj["uav_source_object"] = source_obj.name
+    qem_obj["uav_can_continue_pipeline"] = True
+    qem_obj["uav_can_be_bake_source"] = False
+
+
+def _validate_replacement_geometry(vertices, faces):
+    vertices = np.asarray(vertices, dtype=np.float64)
+    faces = np.asarray(faces, dtype=np.int32)
+
+    if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+        raise RuntimeError("QEM produced invalid replacement vertices.")
+    if faces.ndim != 2 or faces.shape[1] != 3 or len(faces) == 0:
+        raise RuntimeError("QEM produced no valid replacement faces.")
+    if not np.isfinite(vertices).all():
+        raise RuntimeError("QEM produced non-finite vertex coordinates.")
+    if int(np.min(faces)) < 0 or int(np.max(faces)) >= len(vertices):
+        raise RuntimeError("QEM produced face indices outside the vertex range.")
+
+    repeated_vertices = (
+        (faces[:, 0] == faces[:, 1]) |
+        (faces[:, 1] == faces[:, 2]) |
+        (faces[:, 2] == faces[:, 0])
+    )
+    if bool(np.any(repeated_vertices)):
+        raise RuntimeError("QEM produced faces with repeated vertex indices.")
+
+    tri_a = vertices[faces[:, 0]]
+    tri_b = vertices[faces[:, 1]]
+    tri_c = vertices[faces[:, 2]]
+    double_area = np.linalg.norm(np.cross(tri_b - tri_a, tri_c - tri_a), axis=1)
+    if bool(np.any(double_area <= GEOMETRY_AREA_EPSILON)):
+        raise RuntimeError("QEM produced zero-area or near-zero-area faces.")
+
+    return True
+
+
+def _mesh_vertex_count(obj):
+    if obj is None or obj.data is None:
+        return 0
+    obj.data.update()
+    return len(obj.data.vertices)
+
+
+def _mesh_triangle_count(obj):
+    if obj is None or obj.data is None:
+        return 0
+    obj.data.update()
+    return sum(max(1, len(poly.vertices) - 2) for poly in obj.data.polygons)
+
+
+def _target_reached(obj, target_v=None, target_tris=None):
+    if target_v is not None and _mesh_vertex_count(obj) > int(target_v):
+        return False
+    if target_tris is not None and _mesh_triangle_count(obj) > int(target_tris):
+        return False
+    return True
+
+
+def _cleanup_undershot_target(obj, target_v=None, target_tris=None):
+    if target_v is not None and _mesh_vertex_count(obj) < int(target_v):
+        return True
+    if target_tris is not None and _mesh_triangle_count(obj) < int(target_tris):
+        return True
+    return False
+
 
 def _collect_mesh_seam_edges(mesh):
     seam_edges = set()
@@ -207,50 +349,86 @@ class UAV_OT_qem_simplify(Operator):
         if hasattr(self, '_timer'):
             self.wm.event_timer_remove(self._timer)
 
-    def _process_one(self, context, original_obj):
-        bpy.ops.object.select_all(action='DESELECT')
-        original_obj.select_set(True)
-        context.view_layer.objects.active = original_obj
-
-        temp_name = f"{original_obj.name}_QEM_TMP"
-        new_obj = _duplicate_mesh_object(original_obj, temp_name, self.qem_col)
-        object_start = time.perf_counter()
-        try:
-            self._pre_cleanup(new_obj)
-
-            target_v, current_v, current_tris = self._resolve_target_counts(new_obj)
-            if target_v >= current_v:
-                bpy.data.objects.remove(new_obj, do_unlink=True)
-                self.report({'INFO'}, f"QEM skipped '{original_obj.name}' because the target is already reached.")
-                return
-
-            if self.props.qem_engine == 'FAST_DECIMATE':
-                used_engine = self._run_fast_decimate(new_obj, target_v, current_v, current_tris)
-            else:
-                used_engine = self._run_true_qem(context, new_obj, target_v)
-
-            self._post_cleanup(new_obj)
-            self._fix_normals_zup(new_obj)
-        except Exception:
-            if new_obj.name in bpy.data.objects:
-                bpy.data.objects.remove(bpy.data.objects[new_obj.name], do_unlink=True)
-            context.view_layer.objects.active = original_obj
-            original_obj.select_set(True)
-            raise
-
+    def _finalize_output_copy(self, context, original_obj, new_obj, used_engine):
         suffix = ENGINE_SUFFIXES.get(used_engine, used_engine)
         final_name = f"{original_obj.name}_{suffix}"
         new_obj.name = final_name
         if new_obj.data is not None:
             new_obj.data.name = final_name
 
+        _set_source_metadata(original_obj, final_name)
+        _set_qem_metadata(new_obj, original_obj)
         original_obj.hide_set(True)
         original_obj.select_set(False)
+        new_obj.hide_set(False)
+        new_obj.select_set(True)
+        context.view_layer.objects.active = new_obj
         self.created_qem_chunks.append(new_obj)
+        return final_name
+
+    def _process_one(self, context, original_obj):
+        source_state = _capture_source_state(context, original_obj)
+        source_signature = _capture_mesh_signature(original_obj)
+        _activate_only(context, original_obj)
+
+        temp_name = f"{original_obj.name}_QEM_TMP"
+        new_obj = _duplicate_mesh_object(original_obj, temp_name, self.qem_col)
+        object_start = time.perf_counter()
+        try:
+            _activate_only(context, new_obj)
+            target_v, target_tris, current_v, current_tris = self._resolve_target_counts(new_obj)
+            enforced_target_v = None if target_tris is not None else target_v
+            self._run_guarded_cleanup(new_obj, self._pre_cleanup, enforced_target_v, target_tris, "pre-cleanup")
+
+            if _target_reached(new_obj, enforced_target_v, target_tris):
+                self._run_guarded_cleanup(new_obj, self._post_cleanup, enforced_target_v, target_tris, "post-cleanup")
+                self._fix_normals_zup(new_obj)
+                _assert_source_mesh_unchanged(original_obj, source_signature)
+                used_engine = self.props.qem_engine
+                self._finalize_output_copy(context, original_obj, new_obj, used_engine)
+                self.report({'INFO'}, f"QEM copied '{original_obj.name}' because the target is already reached.")
+                return
+
+            if self.props.qem_engine == 'FAST_DECIMATE':
+                used_engine = self._run_fast_decimate(new_obj, enforced_target_v, target_tris, current_v, current_tris)
+            else:
+                used_engine = self._run_true_qem(context, new_obj, target_v, target_tris)
+
+            self._run_guarded_cleanup(new_obj, self._post_cleanup, enforced_target_v, target_tris, "post-cleanup")
+            self._fix_normals_zup(new_obj)
+            _assert_source_mesh_unchanged(original_obj, source_signature)
+        except Exception:
+            if new_obj.name in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects[new_obj.name], do_unlink=True)
+            _restore_source_state(context, original_obj, source_state)
+            raise
+
+        self._finalize_output_copy(context, original_obj, new_obj, used_engine)
 
         elapsed = time.perf_counter() - object_start
         engine_label = ENGINE_LABELS.get(used_engine, used_engine)
         self.report({'INFO'}, f"{engine_label} finished on '{original_obj.name}' in {elapsed:.2f}s.")
+
+    def _run_guarded_cleanup(self, obj, cleanup_func, target_v, target_tris, label):
+        mesh_before = obj.data
+        snapshot = mesh_before.copy()
+        snapshot.name = mesh_before.name
+        cleanup_func(obj)
+        if _cleanup_undershot_target(obj, target_v, target_tris):
+            cleaned_mesh = obj.data
+            obj.data = snapshot
+            obj.data.name = mesh_before.name
+            if cleaned_mesh.name in bpy.data.meshes:
+                bpy.data.meshes.remove(cleaned_mesh)
+            self.report(
+                {'WARNING'},
+                f"QEM {label} skipped on '{obj.name}' because it would reduce below the requested target.",
+            )
+            return False
+
+        if snapshot.name in bpy.data.meshes:
+            bpy.data.meshes.remove(snapshot)
+        return True
 
     def _pre_cleanup(self, obj):
         bpy.context.view_layer.objects.active = obj
@@ -282,6 +460,14 @@ class UAV_OT_qem_simplify(Operator):
         bm_n.free()
         obj.data.update()
 
+    def _triangulate_object(self, obj):
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.mode_set(mode='EDIT')
+        bm = bmesh.from_edit_mesh(obj.data)
+        bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='BEAUTY')
+        bmesh.update_edit_mesh(obj.data)
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     def _resolve_target_counts(self, obj):
         bm = bmesh.new()
         bm.from_mesh(obj.data)
@@ -294,8 +480,15 @@ class UAV_OT_qem_simplify(Operator):
         mode = self.props.qem_target_mode
         if mode == 'VERTEX_COUNT':
             target_v = int(max(4, self.props.qem_target_vertex_count))
+            target_tris = None
         elif mode == 'RATIO':
-            target_v = int(max(4, round(current_v * self.props.qem_target_ratio)))
+            ratio = min(max(float(self.props.qem_target_ratio), 0.001), 1.0)
+            target_tris = int(max(4, round(current_tris * ratio)))
+            target_v = int(max(4, round(current_v * ratio)))
+        elif mode == 'TRIANGLE_COUNT':
+            target_tris = int(max(4, self.props.qem_target_triangle_count))
+            tri_ratio = target_tris / max(1, current_tris)
+            target_v = int(max(4, round(current_v * tri_ratio)))
         else:
             area_for_calc = total_area_m2 * 10000.0 if self.props.qem_density_unit == 'CM2' else total_area_m2
             if current_tris > 0 and area_for_calc > 0:
@@ -303,14 +496,50 @@ class UAV_OT_qem_simplify(Operator):
                 ratio = min(max(target_tris / current_tris, 0.0), 1.0)
             else:
                 ratio = 1.0
+            target_tris = int(max(4, round(current_tris * ratio)))
             target_v = int(max(4, round(current_v * ratio)))
-        target_v = min(target_v, current_v)
-        return target_v, current_v, current_tris
 
-    def _run_fast_decimate(self, obj, target_v, current_v, _current_tris):
-        ratio = min(max(target_v / max(1, current_v), 0.0), 1.0)
-        if ratio < 0.99:
-            mod = obj.modifiers.new(name="QEM_Decimate", type='DECIMATE')
+        target_v = min(target_v, current_v)
+        if target_tris is not None:
+            target_tris = min(int(target_tris), current_tris)
+        return target_v, target_tris, current_v, current_tris
+
+    def _run_fast_decimate(self, obj, target_v, target_tris, current_v, current_tris):
+        target_v = int(max(4, target_v)) if target_v is not None else None
+        target_tris = int(max(4, target_tris)) if target_tris is not None else None
+        if target_tris is not None:
+            self._triangulate_object(obj)
+        if target_tris is not None and target_v is None:
+            self._run_triangle_decimate_search(obj, target_tris)
+            if not _target_reached(obj, None, target_tris):
+                raise RuntimeError(
+                    f"Fast Decimate could not reach target triangle count: "
+                    f"{_mesh_triangle_count(obj)} tris remain, target is {target_tris}. "
+                    "Disable Preserve Seams or use a less restrictive target."
+                )
+            return 'FAST_DECIMATE'
+        if _target_reached(obj, target_v, target_tris):
+            return 'FAST_DECIMATE'
+
+        dampening = 1.0
+        last_score = int(current_v) + int(current_tris)
+        for pass_index in range(12):
+            current_count = _mesh_vertex_count(obj)
+            current_tri_count = _mesh_triangle_count(obj)
+            if _target_reached(obj, target_v, target_tris):
+                return 'FAST_DECIMATE'
+
+            ratios = []
+            if target_v is not None:
+                ratios.append(target_v / max(1, current_count))
+            if target_tris is not None:
+                ratios.append(target_tris / max(1, current_tri_count))
+            ratio = min(ratios)
+            if target_tris is not None and ratio < 0.95:
+                ratio *= 1.18
+            ratio *= dampening
+            ratio = min(max(ratio, 0.001), 0.999)
+            mod = obj.modifiers.new(name=f"QEM_Decimate_{pass_index + 1:02d}", type='DECIMATE')
             mod.decimate_type = 'COLLAPSE'
             mod.ratio = ratio
             mod.use_collapse_triangulate = True
@@ -318,15 +547,100 @@ class UAV_OT_qem_simplify(Operator):
                 mod.delimit = {'SEAM'}
             bpy.context.view_layer.objects.active = obj
             bpy.ops.object.modifier_apply(modifier=mod.name)
+
+            new_count = _mesh_vertex_count(obj)
+            new_tri_count = _mesh_triangle_count(obj)
+            if _target_reached(obj, target_v, target_tris):
+                return 'FAST_DECIMATE'
+            new_score = new_count + new_tri_count
+            if new_score >= last_score:
+                dampening *= 0.5
+            else:
+                dampening = min(dampening * 0.85, 1.0)
+            last_score = new_score
+
+        final_count = _mesh_vertex_count(obj)
+        final_tri_count = _mesh_triangle_count(obj)
+        if not _target_reached(obj, target_v, target_tris):
+            raise RuntimeError(
+                f"Fast Decimate could not reach target vertex count: "
+                f"{final_count} vertices / {final_tri_count} tris remain, "
+                f"target is {target_v if target_v is not None else 'any'} vertices / "
+                f"{target_tris if target_tris is not None else 'any'} tris. "
+                "Disable Preserve Seams or use a less restrictive target."
+            )
         return 'FAST_DECIMATE'
 
-    def _run_true_qem(self, context, obj, target_v):
+    def _apply_decimate_modifier(self, obj, ratio, pass_index):
+        mod = obj.modifiers.new(name=f"QEM_Decimate_{pass_index + 1:02d}", type='DECIMATE')
+        mod.decimate_type = 'COLLAPSE'
+        mod.ratio = min(max(float(ratio), 0.001), 0.999)
+        mod.use_collapse_triangulate = True
+        if self.props.qem_preserve_seams:
+            mod.delimit = {'SEAM'}
         bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.mode_set(mode='EDIT')
-        bm = bmesh.from_edit_mesh(obj.data)
-        bmesh.ops.triangulate(bm, faces=bm.faces[:], quad_method='BEAUTY', ngon_method='BEAUTY')
-        bmesh.update_edit_mesh(obj.data)
-        bpy.ops.object.mode_set(mode='OBJECT')
+        bpy.ops.object.modifier_apply(modifier=mod.name)
+
+    def _make_decimate_probe(self, obj, ratio, pass_index):
+        probe = obj.copy()
+        probe.data = obj.data.copy()
+        probe.name = f"{obj.name}_DECIMATE_PROBE"
+        probe.data.name = f"{obj.data.name}_DECIMATE_PROBE"
+        target_collection = obj.users_collection[0] if obj.users_collection else bpy.context.scene.collection
+        target_collection.objects.link(probe)
+        self._apply_decimate_modifier(probe, ratio, pass_index)
+        tris = _mesh_triangle_count(probe)
+        verts = _mesh_vertex_count(probe)
+        return probe, tris, verts
+
+    def _run_triangle_decimate_search(self, obj, target_tris):
+        current_tris = _mesh_triangle_count(obj)
+        if current_tris <= target_tris:
+            return
+
+        low = 0.001
+        high = 0.999
+        best_probe = None
+        best_tris = -1
+        probes_to_remove = []
+
+        for pass_index in range(8):
+            ratio = (low + high) * 0.5
+            probe, probe_tris, _probe_verts = self._make_decimate_probe(obj, ratio, pass_index)
+            if probe_tris <= target_tris:
+                if probe_tris > best_tris:
+                    if best_probe is not None:
+                        probes_to_remove.append(best_probe)
+                    best_probe = probe
+                    best_tris = probe_tris
+                else:
+                    probes_to_remove.append(probe)
+                low = ratio
+            else:
+                probes_to_remove.append(probe)
+                high = ratio
+
+        if best_probe is None:
+            probe, _probe_tris, _probe_verts = self._make_decimate_probe(obj, low, 8)
+            best_probe = probe
+
+        old_mesh = obj.data
+        old_mesh_name = old_mesh.name
+        best_mesh = best_probe.data
+        obj.data = best_mesh
+        bpy.data.objects.remove(best_probe, do_unlink=True)
+        if old_mesh.name in bpy.data.meshes:
+            bpy.data.meshes.remove(old_mesh)
+        best_mesh.name = old_mesh_name
+
+        for probe in probes_to_remove:
+            probe_mesh = probe.data
+            bpy.data.objects.remove(probe, do_unlink=True)
+            if probe_mesh.name in bpy.data.meshes:
+                bpy.data.meshes.remove(probe_mesh)
+
+    def _run_true_qem(self, context, obj, target_v, target_tris):
+        self._triangulate_object(obj)
 
         verts = np.array([vertex.co[:] for vertex in obj.data.vertices], dtype=np.float64)
         faces = np.array([polygon.vertices[:] for polygon in obj.data.polygons], dtype=np.int32)
@@ -340,7 +654,8 @@ class UAV_OT_qem_simplify(Operator):
             raise RuntimeError("True QEM found open boundaries. Switch boundary handling to Fallback or use Fast Decimate.")
         if mesh.has_boundary() and self.props.qem_boundary_action == 'FALLBACK':
             current_v = len(verts)
-            return self._run_fast_decimate(obj, target_v, current_v, len(faces))
+            enforced_target_v = None if target_tris is not None else target_v
+            return self._run_fast_decimate(obj, enforced_target_v, target_tris, current_v, len(faces))
 
         if self.props.qem_engine == 'EDGE_LENGTH':
             simp = mesh.edge_based_simplification(
@@ -367,11 +682,15 @@ class UAV_OT_qem_simplify(Operator):
             face_sources=getattr(simp, 'face_sources', None),
             mesh_face_data=mesh_face_data,
         )
+        enforced_target_v = None if target_tris is not None else target_v
+        if not _target_reached(obj, enforced_target_v, target_tris):
+            self._run_fast_decimate(obj, enforced_target_v, target_tris, _mesh_vertex_count(obj), _mesh_triangle_count(obj))
         return used_engine
 
     def _replace_mesh_geometry(self, context, obj, vertices, faces, seam_edges=None, face_sources=None, mesh_face_data=None):
         mesh = obj.data
         seam_edges = seam_edges or set()
+        _validate_replacement_geometry(vertices, faces)
         mesh.clear_geometry()
         mesh.from_pydata([tuple(map(float, vert)) for vert in vertices], [], [tuple(map(int, face)) for face in faces])
         mesh.update()

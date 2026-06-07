@@ -204,7 +204,8 @@ class UAVOptimizerProperties(PropertyGroup):
         description="How the simplification target is defined",
         items=[
             ('DENSITY', "Density", "Compute the target from triangle density and surface area"),
-            ('RATIO', "Ratio", "Keep a percentage of the current vertices"),
+            ('RATIO', "Ratio", "Keep a percentage of the current triangles"),
+            ('TRIANGLE_COUNT', "Triangle Count", "Use an explicit target triangle count"),
             ('VERTEX_COUNT', "Vertex Count", "Use an explicit target vertex count"),
         ],
         default='DENSITY'
@@ -230,6 +231,11 @@ class UAVOptimizerProperties(PropertyGroup):
         name="Target Vertices",
         description="Explicit target vertex count used by the true QEM / edge-length solvers",
         default=10000, min=4, max=10000000
+    )
+    qem_target_triangle_count: IntProperty(
+        name="Target Triangles",
+        description="Explicit target triangle count. Ratio and Density targets are also enforced as triangle counts",
+        default=50000, min=4, max=10000000
     )
     qem_valence_aware: BoolProperty(
         name="Valence Aware",

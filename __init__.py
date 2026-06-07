@@ -1,8 +1,8 @@
 bl_info = {
     "name": "MeshForge UAV",
     "author": "Rodrigo Arantes",
-    "version": (1, 7, 0),
-    "blender": (4, 5, 0),
+    "version": (1, 2, 3),
+    "blender": (4, 5, 10),
     "location": "View3D > UI > MeshForge UAV",
     "description": (
         "MeshForge UAV photogrammetry / LiDAR post-processing pipeline. "
