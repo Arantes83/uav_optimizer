@@ -11,7 +11,7 @@ MeshForge UAV is a Blender add-on for photogrammetry, LiDAR, terrain, and high-d
 - Add-on display name: `MeshForge UAV`
 - Python package folder: `uav_optimizer`
 - Blender version declared in the add-on: `4.5.10 LTS`
-- Current add-on version: `0.2.3` pre-release
+- Current add-on version: `1.0.0` first-release
 - Package type: Blender 3D View sidebar add-on
 - Panel location: `View3D > Sidebar > MeshForge UAV`
 
