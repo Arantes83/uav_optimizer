@@ -305,6 +305,35 @@ class UAVOptimizerProperties(PropertyGroup):
         name="Target Quads", default=50000, min=100, max=1000000,
         description="Total quad count for QuadriFlow/QuadWild"
     )
+    quadriflow_target_mode: EnumProperty(
+        name="Target Mode",
+        description="How the QuadriFlow target is defined",
+        items=[
+            ('QUAD_COUNT', "Quad Count", "Use an explicit target quad count"),
+            ('RATIO', "Ratio", "Keep an approximate percentage of the current triangle-equivalent count"),
+            ('DENSITY', "Density", "Compute an approximate target from triangle density and surface area"),
+        ],
+        default='QUAD_COUNT',
+    )
+    quadriflow_target_ratio: FloatProperty(
+        name="Keep Ratio",
+        description="Approximate fraction of the current triangle-equivalent count to keep before converting to quads",
+        default=1.0, min=0.001, max=1.0, precision=4,
+    )
+    quadriflow_density_unit: EnumProperty(
+        name="Unit",
+        description="Surface-area unit used by QuadriFlow density targeting",
+        items=[
+            ('M2', "m^2", "Triangles per square meter"),
+            ('CM2', "cm^2", "Triangles per square centimeter"),
+        ],
+        default='M2',
+    )
+    quadriflow_target_density: FloatProperty(
+        name="Density",
+        description="Approximate triangle density used to compute the QuadriFlow target automatically",
+        default=4.0, min=0.0001, max=1000000.0,
+    )
     feature_angle: FloatProperty(
         name="Feature Angle", default=45.0, min=0.0, max=180.0,
         description="Angle threshold to preserve sharp edges in QuadWild"
@@ -461,6 +490,46 @@ class UAVQuadWildProperties(PropertyGroup):
     )
 
     # -- Quad density -----------------------------------------
+    target_mode: EnumProperty(
+        name="Target Mode",
+        description="How the approximate QuadWild density target is defined",
+        items=[
+            ('RATIO', "Ratio", "Keep an approximate percentage of the current triangle-equivalent count"),
+            ('DENSITY', "Density", "Compute an approximate target from triangle density and surface area"),
+            ('TRIANGLE_COUNT', "Triangle Count", "Use an explicit approximate triangle-equivalent target"),
+            ('VERTEX_COUNT', "Vertex Count", "Use an explicit approximate vertex target"),
+        ],
+        default='RATIO',
+    )
+    density_unit: EnumProperty(
+        name="Unit",
+        description="Surface-area unit used by Density target mode",
+        items=[
+            ('M2', "m^2", "Triangles per square meter"),
+            ('CM2', "cm^2", "Triangles per square centimeter"),
+        ],
+        default='M2',
+    )
+    target_density: FloatProperty(
+        name="Density",
+        description="Approximate target triangle density used to compute QuadWild scale",
+        default=4.0, min=0.0001, max=1000000.0,
+    )
+    target_ratio: FloatProperty(
+        name="Keep Ratio",
+        description="Approximate fraction of the current triangle-equivalent count to keep",
+        default=1.0, min=0.001, max=1.0, precision=4,
+    )
+    target_vertex_count: IntProperty(
+        name="Target Vertices",
+        description="Approximate final vertex target. QuadWild maps this to a scale factor internally",
+        default=10000, min=4, max=10000000,
+    )
+    target_triangle_count: IntProperty(
+        name="Target Triangles",
+        description="Approximate final triangle-equivalent target. QuadWild maps this to a scale factor internally",
+        default=50000, min=4, max=10000000,
+    )
     scale_fact: FloatProperty(
         name="Scale Factor",
         description="Values >1 produce larger quads; <1 preserves more detail",

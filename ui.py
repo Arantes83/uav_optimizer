@@ -189,7 +189,15 @@ class UAV_PT_main_panel(Panel):
             box.prop(props, "remesh_method", text="Algorithm")
 
             if props.remesh_method == 'QUADRIFLOW':
-                box.prop(props, "target_quad_count")
+                box.prop(props, "quadriflow_target_mode", text="Target")
+                if props.quadriflow_target_mode == 'DENSITY':
+                    row = box.row(align=True)
+                    row.prop(props, "quadriflow_target_density")
+                    row.prop(props, "quadriflow_density_unit", text="")
+                elif props.quadriflow_target_mode == 'RATIO':
+                    box.prop(props, "quadriflow_target_ratio", text="Keep Ratio")
+                else:
+                    box.prop(props, "target_quad_count", text="Target Quads")
                 box.operator("uav.quadriflow_retopo", icon='PLAY', text="Run QuadriFlow")
 
             elif props.remesh_method == 'QUADWILD':
@@ -678,7 +686,17 @@ class UAV_PT_main_panel(Panel):
         row = col.row(align=True)
         row.prop(qw, "enable_preprocess", text="Preprocess")
         row.prop(qw, "enable_smoothing",  text="Smoothing")
-        col.prop(qw, "scale_fact", text="Scale / Density")
+        col.prop(qw, "target_mode", text="Target")
+        if qw.target_mode == 'DENSITY':
+            density_row = col.row(align=True)
+            density_row.prop(qw, "target_density")
+            density_row.prop(qw, "density_unit", text="")
+        elif qw.target_mode == 'RATIO':
+            col.prop(qw, "target_ratio", text="Keep Ratio")
+        elif qw.target_mode == 'TRIANGLE_COUNT':
+            col.prop(qw, "target_triangle_count", text="Target Triangles")
+        else:
+            col.prop(qw, "target_vertex_count", text="Target Vertices")
 
         box.separator(factor=0.4)
 
@@ -689,40 +707,6 @@ class UAV_PT_main_panel(Panel):
             sub.use_property_split    = True
             sub.use_property_decorate = False
             sub.prop(qw, "sharp_angle", text="Angle")
-
-        box.separator(factor=0.4)
-
-        row = box.row(align=True)
-        row.label(text="Symmetry:")
-        row.prop(qw, "symmetry_x", toggle=True)
-        row.prop(qw, "symmetry_y", toggle=True)
-        row.prop(qw, "symmetry_z", toggle=True)
-
-        box.separator(factor=0.4)
-
-        col = box.column(align=True)
-        col.use_property_split    = True
-        col.use_property_decorate = False
-        col.prop(qw, "alpha")
-        col.prop(qw, "ilp_method")
-        col.prop(qw, "time_limit")
-        col.prop(qw, "gap_limit")
-        col.prop(qw, "minimum_gap")
-        col.prop(qw, "fixed_chart_clusters")
-
-        box.separator(factor=0.4)
-
-        col = box.column(align=True)
-        col.use_property_split    = True
-        col.use_property_decorate = False
-        col.prop(qw, "flow_config",    text="Flow Config")
-        col.prop(qw, "satsuma_config", text="Satsuma Config")
-
-        box.separator(factor=0.4)
-
-        row = box.row(align=True)
-        row.prop(qw, "debug",     toggle=True, icon='HIDE_OFF',   text="Debug")
-        row.prop(qw, "use_cache", toggle=True, icon='FILE_CACHE', text="Use Cache")
 
         box.separator(factor=0.4)
         box.operator("uav.quadwild_retopo", icon='PLAY', text="Run QuadWild")

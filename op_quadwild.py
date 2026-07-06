@@ -25,6 +25,21 @@ from .quadwild_util import bisect, exporter, importer
 
 QUADWILD_DEFAULT_CALLBACK_TIMES = [3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 90.0, 120.0]
 QUADWILD_DEFAULT_CALLBACK_GAPS = [0.005, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.3]
+QUADWILD_TARGET_WARNING_DEVIATION = 0.25
+QUADWILD_NATURAL_OUTPUT_RATIO = 0.3518
+QUADWILD_SCALE_TARGET_EXPONENT = 1.2915
+
+
+def _triangle_equivalent_count(mesh):
+    return sum(max(1, len(poly.vertices) - 2) for poly in mesh.polygons)
+
+
+def _mesh_face_breakdown(mesh):
+    faces = len(mesh.polygons)
+    quads = sum(1 for poly in mesh.polygons if len(poly.vertices) == 4)
+    triangles = sum(1 for poly in mesh.polygons if len(poly.vertices) == 3)
+    ngons = faces - quads - triangles
+    return faces, quads, triangles, ngons
 
 
 class UAV_OT_quadwild(Operator):
@@ -94,6 +109,7 @@ class UAV_OT_quadwild(Operator):
 
         bm = None
         evaluated_obj = None
+        target_info = None
 
         try:
             # ----------------------------------------------------------
@@ -155,6 +171,8 @@ class UAV_OT_quadwild(Operator):
                     quad_method='SHORT_EDGE', ngon_method='BEAUTY'
                 )
 
+                target_info = self._resolve_target_info(bm, qw_props)
+
                 # -- Export OBJ ---------------------------------------
                 exporter.export_mesh(bm, mesh_filepath)
 
@@ -185,10 +203,14 @@ class UAV_OT_quadwild(Operator):
             # ----------------------------------------------------------
             # 4. Quadrangulate (always runs - also when use_cache=True)
             # ----------------------------------------------------------
+            if target_info is None:
+                target_info = self._resolve_cached_target_info(obj, qw_props)
+
+            scale_fact = target_info["scale_fact"] if target_info else qw_props.scale_fact
             self.report({'INFO'}, "QuadWild: quadrangulating (ILP)… this may take a while.")
             qw.quadrangulate(
                 enableSmoothing                  = qw_props.enable_smoothing,
-                scaleFact                        = qw_props.scale_fact,
+                scaleFact                        = scale_fact,
                 fixedChartClusters               = qw_props.fixed_chart_clusters,
                 alpha                            = qw_props.alpha,
                 ilpMethod                        = qw_props.ilp_method,
@@ -225,6 +247,7 @@ class UAV_OT_quadwild(Operator):
             final_mesh = importer.import_mesh(final_path)
             final_obj  = bpy.data.objects.new(f"{base_name}_QuadWild", final_mesh)
             context.collection.objects.link(final_obj)
+            self._report_target_result(final_obj, target_info)
 
             # Move to dedicated collection
             context.collection.objects.unlink(final_obj)
@@ -265,6 +288,117 @@ class UAV_OT_quadwild(Operator):
                 evaluated_obj.to_mesh_clear()
 
         return {'FINISHED'}
+
+    def _resolve_target_info(self, bm, qw_props):
+        bm.verts.ensure_lookup_table()
+        current_vertices = len(bm.verts)
+        current_tris = sum(max(1, len(face.verts) - 2) for face in bm.faces)
+        total_area_m2 = sum(face.calc_area() for face in bm.faces)
+        return self._build_target_info(
+            qw_props,
+            current_vertices=current_vertices,
+            current_tris=current_tris,
+            total_area_m2=total_area_m2,
+            cache_warning=False,
+        )
+
+    def _resolve_cached_target_info(self, obj, qw_props):
+        mesh = obj.data
+        current_vertices = len(mesh.vertices)
+        current_tris = _triangle_equivalent_count(mesh)
+        total_area_m2 = sum(poly.area for poly in mesh.polygons)
+        info = self._build_target_info(
+            qw_props,
+            current_vertices=current_vertices,
+            current_tris=current_tris,
+            total_area_m2=total_area_m2,
+            cache_warning=True,
+        )
+        self.report(
+            {'WARNING'},
+            "QuadWild Use Cache is enabled; target scale was estimated from the active mesh, "
+            "but cached trace data may come from older geometry."
+        )
+        return info
+
+    def _build_target_info(self, qw_props, current_vertices, current_tris, total_area_m2, cache_warning):
+        current_vertices = max(1, int(current_vertices))
+        current_tris = max(1, int(current_tris))
+        mode = qw_props.target_mode
+
+        if mode == 'VERTEX_COUNT':
+            requested_value = int(max(4, qw_props.target_vertex_count))
+            target_tris = requested_value * 2
+            metric_name = "vertices"
+            target_metric = requested_value
+        elif mode == 'TRIANGLE_COUNT':
+            requested_value = int(max(4, qw_props.target_triangle_count))
+            target_tris = requested_value
+            metric_name = "tri-equivalent"
+            target_metric = requested_value
+        elif mode == 'DENSITY':
+            area_for_calc = total_area_m2 * 10000.0 if qw_props.density_unit == 'CM2' else total_area_m2
+            requested_value = max(0.0001, float(qw_props.target_density))
+            target_tris = int(max(4, round(area_for_calc * requested_value))) if area_for_calc > 0 else current_tris
+            metric_name = "tri-equivalent"
+            target_metric = target_tris
+        else:
+            requested_value = min(max(float(qw_props.target_ratio), 0.001), 1.0)
+            target_tris = int(max(4, round(current_tris * requested_value)))
+            metric_name = "tri-equivalent"
+            target_metric = target_tris
+
+        target_tris = max(4, min(int(target_tris), current_tris * 100))
+        # QuadWild does not preserve input density at scaleFact=1.0. Statue
+        # calibration points:
+        # 103k input, scaleFact=1.1665 -> 29.7k tri-equiv
+        # 103k input, scaleFact=1.0905 -> 32.4k tri-equiv
+        # These imply a natural scale=1 output near 35.18% of input and a
+        # local scale exponent near 1.2915.
+        natural_target_tris = max(1, current_tris * QUADWILD_NATURAL_OUTPUT_RATIO)
+        scale_fact = (natural_target_tris / max(1, target_tris)) ** (1.0 / QUADWILD_SCALE_TARGET_EXPONENT)
+        scale_fact = min(max(scale_fact, 0.01), 10.0)
+
+        return {
+            "mode": mode,
+            "current_vertices": current_vertices,
+            "current_tris": current_tris,
+            "target_tris": target_tris,
+            "target_metric": target_metric,
+            "metric_name": metric_name,
+            "scale_fact": scale_fact,
+            "scale_exponent": QUADWILD_SCALE_TARGET_EXPONENT,
+            "natural_output_ratio": QUADWILD_NATURAL_OUTPUT_RATIO,
+            "cache_warning": cache_warning,
+        }
+
+    def _report_target_result(self, final_obj, target_info):
+        if not target_info:
+            return
+
+        final_vertices = len(final_obj.data.vertices)
+        final_tris = _triangle_equivalent_count(final_obj.data)
+        final_faces, final_quads, final_triangles, final_ngons = _mesh_face_breakdown(final_obj.data)
+        if target_info["metric_name"] == "vertices":
+            final_metric = final_vertices
+        else:
+            final_metric = final_tris
+
+        target_metric = max(1, int(target_info["target_metric"]))
+        deviation = abs(final_metric - target_metric) / target_metric
+        message = (
+            f"QuadWild target {target_info['mode']}: requested {target_metric} "
+            f"{target_info['metric_name']}, result {final_metric} "
+            f"{target_info['metric_name']} ({final_vertices} verts / {final_faces} faces, "
+            f"{final_quads} quads / {final_triangles} tris / {final_ngons} ngons, "
+            f"{final_tris} tri-equiv), scaleFact {target_info['scale_fact']:.4f}, "
+            f"natural {target_info['natural_output_ratio'] * 100:.1f}%, "
+            f"exponent {target_info['scale_exponent']:.4f}, deviation {deviation * 100:.1f}%."
+        )
+        if deviation > QUADWILD_TARGET_WARNING_DEVIATION:
+            self.report({'WARNING'}, message)
+        else:
+            self.report({'INFO'}, message)
 
     # ------------------------------------------------------------------
     # Helper: import an intermediate OBJ as a hidden debug object

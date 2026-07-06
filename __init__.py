@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MeshForge UAV",
     "author": "Rodrigo Arantes",
-    "version": (0, 2, 3),
+    "version": (1, 0, 0),
     "blender": (4, 5, 10),
     "location": "View3D > UI > MeshForge UAV",
     "description": (
@@ -11,7 +11,7 @@ bl_info = {
         "advanced UV island packing, Albedo / AO / Normal map baking, LOD generation, "
         "and engine-ready FBX export."
     ),
-    "warning": "Pre-release build; APIs and generated outputs may change.",
+    "warning": "Release candidate build; APIs and generated outputs may change.",
     "category": "3D View",
 }
 
